@@ -1,0 +1,1 @@
+"""NosePrint local application modules."""

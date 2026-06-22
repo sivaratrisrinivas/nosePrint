@@ -1,0 +1,1 @@
+"""NosePrint acceptance tests."""

@@ -1,0 +1,32 @@
+{
+  "dataset": {
+    "id": "kaggle-nandini1999-perfume-recommendation-dataset-v1",
+    "download_url": "https://www.kaggle.com/datasets/nandini1999/perfume-recommendation-dataset/versions/1",
+    "publisher": "Nandini Bansal (Kaggle account nandini1999)",
+    "claimed_license": "CC0: Public Domain",
+    "license_text_url": "https://creativecommons.org/publicdomain/zero/1.0/legalcode",
+    "license_evidence": [
+      "https://www.kaggle.com/datasets/nandini1999/perfume-recommendation-dataset/data"
+    ],
+    "license_chain_status": "inconclusive",
+    "provenance_evidence": [],
+    "provenance_status": "inconclusive",
+    "expected_schema": [
+      "Name",
+      "Brand",
+      "Description",
+      "Notes",
+      "Image URL"
+    ],
+    "expected_row_count": 2191,
+    "quality_status": "inconclusive",
+    "quality_risks": [
+      "The data page does not identify the upstream sources of descriptions, notes, or image URLs.",
+      "The publisher's authority to apply CC0 to every field is not evidenced.",
+      "The schema does not identify Fragrance Edition concentration.",
+      "The schema has no main accords, note pyramid, or scent-family fields.",
+      "Missing-value, duplicate, and malformed-row rates have not been measured from a pinned artifact.",
+      "Remote image URLs may have separate copyright and availability constraints."
+    ]
+  }
+}

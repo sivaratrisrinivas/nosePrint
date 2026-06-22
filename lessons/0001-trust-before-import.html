@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trust before import · NosePrint</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">NosePrint lesson 1 · about 5 minutes</p>
+  <h1>Trust before import</h1>
+  <p>Imagine someone gives you a box of trading cards and says, “You may copy these.” Before putting copies in your shop, you need two answers: <em>Who made the cards?</em> and <em>Did that person have permission to share them?</em></p>
+
+  <div class="gate" aria-label="The catalog trust gate">
+    <span>Source file</span><span class="arrow">→</span>
+    <span>Audit evidence</span><span class="arrow">→</span>
+    <span class="stop">Real Catalog<br>only if passed</span>
+  </div>
+
+  <h2>The important difference</h2>
+  <p>The Kaggle page labels the candidate dataset “CC0: Public Domain.” That is a <strong>license claim</strong>. But it does not say where the descriptions, notes, and image links came from, or show that the uploader could place every field under CC0. That missing chain is a <strong>provenance problem</strong>.</p>
+
+  <div class="callout"><strong>NosePrint’s result:</strong> inconclusive. That does not mean “definitely forbidden.” It means “we do not have enough evidence to call these rows trustworthy Real Catalog inventory.”</div>
+
+  <h2>How the code protects the catalog</h2>
+  <p>The audit command records evidence, checks the file’s schema and row count, and calculates a SHA-256 fingerprint. The import command then checks all gates again and refuses a different file.</p>
+
+  <pre><code>python3 -m noseprint.catalog audit ...
+# Audit verdict: INCONCLUSIVE
+# exit code 2
+
+python3 -m noseprint.catalog import ...
+# Import blocked: audit verdict is not PASSED.</code></pre>
+
+  <p>A passing test fixture proves the machinery works without pretending the real candidate passed. When a row is accepted, SQLite stores both its original values and cleaned values. Missing identity is rejected; missing scent notes is quarantined; repeated editions are counted as duplicates.</p>
+
+  <h2>Quick check</h2>
+  <p><strong>Question:</strong> If someone changes only the report word from “inconclusive” to “passed,” should import start?</p>
+  <details>
+    <summary>Reveal the answer</summary>
+    <p>No. The importer independently checks every recorded gate and its evidence. One edited word cannot unlock the Real Catalog.</p>
+  </details>
+
+  <h2>Why this matters for vector search</h2>
+  <p>A vector database can find similar rows very quickly, but it cannot tell whether those rows were legally and honestly sourced. Trust has to be established <em>before</em> embeddings and nearest-neighbor search. Fast answers built from questionable facts are still questionable answers.</p>
+
+  <p class="caption">Primary sources</p>
+  <p><a href="https://www.kaggle.com/datasets/nandini1999/perfume-recommendation-dataset/data">Candidate dataset card</a> · <a href="https://creativecommons.org/publicdomain/zero/1.0/legalcode">CC0 1.0 legal code</a> · <a href="../reference/catalog-trust-gate.html">Trust-gate reference card</a></p>
+
+  <p>Ask your agent any follow-up question—especially if “license” and “provenance” still feel like the same thing.</p>
+</main>
+</body>
+</html>

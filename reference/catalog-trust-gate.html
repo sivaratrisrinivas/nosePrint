@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Catalog trust gate reference · NosePrint</title>
+  <link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+<main>
+  <p class="eyebrow">NosePrint reference card</p>
+  <h1>Catalog trust gate</h1>
+  <h2>Five checks</h2>
+  <ol>
+    <li><strong>License chain:</strong> Is reuse permission supported by evidence?</li>
+    <li><strong>Provenance:</strong> Can each field be traced to an authorized source?</li>
+    <li><strong>Schema:</strong> Does the file have exactly the expected columns?</li>
+    <li><strong>Row count:</strong> Does the pinned file match the reviewed artifact?</li>
+    <li><strong>Quality:</strong> Have material risks been reviewed and accepted?</li>
+  </ol>
+  <div class="callout"><strong>Rule:</strong> every check must pass. Failed or inconclusive means no Real Catalog import.</div>
+  <h2>Row outcomes</h2>
+  <p><strong>Accepted</strong> → authoritative SQLite facts. <strong>Transformed</strong> → accepted with traceable cleanup. <strong>Duplicate</strong> → deterministic skip. <strong>Rejected</strong> → structurally invalid. <strong>Quarantined</strong> → questionable and excluded pending review.</p>
+  <p><a href="../lessons/0001-trust-before-import.html">Return to the lesson</a></p>
+</main>
+</body>
+</html>
