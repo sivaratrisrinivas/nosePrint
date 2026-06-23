@@ -66,7 +66,7 @@ The catalog workflow has seven commands:
 5. `browse` searches Real Catalog Fragrance Editions by Fragrance name.
 6. `scent-profile` shows the selected Fragrance Edition's Scent Profile.
 7. `scent-matches` returns ranked exact-cosine Scent Matches from the Real
-   Catalog.
+   Catalog with calibrated labels and factual Profile Comparisons.
 
 See [how to run the catalog workflow](docs/catalog-import.md) for complete
 commands.
