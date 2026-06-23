@@ -90,6 +90,349 @@ class CatalogWorkflowTests(unittest.TestCase):
             self.assertNotIn("price", json.dumps(profile).casefold())
             self.assertNotIn("bottle", json.dumps(profile).casefold())
 
+    def test_selected_fragrance_edition_returns_ranked_exact_scent_matches(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+                "--limit",
+                "3",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            response = json.loads(matched.stdout)
+            self.assertEqual(response["status"], "ok")
+            self.assertEqual(response["reference"]["fragrance_edition_id"], 2)
+            self.assertEqual(
+                response["embedding"],
+                {
+                    "model": "noseprint-hash-embedding-384",
+                    "model_version": "1",
+                    "pipeline_version": "scent-profile-serialization-v1",
+                    "dimensions": 384,
+                    "runtime_device": "cpu",
+                },
+            )
+            self.assertEqual(
+                response["results"],
+                [
+                    {
+                        "fragrance_edition_id": 1,
+                        "fragrance": "Sample Rose",
+                        "edition": "Sample Rose EDT",
+                        "concentration": "EDT",
+                        "catalog_kind": "real",
+                        "scent_match": {
+                            "method": "exact_cosine",
+                            "model_specific_score": 0.5,
+                            "score_basis": "Exact cosine over NosePrint Scent Profile embeddings; not a probability or percent-identical claim.",
+                            "strength_label": "weak",
+                        },
+                        "profile_comparison": {
+                            "main_accords": {
+                                "shared": ["floral"],
+                                "reference_only": ["woody"],
+                                "candidate_only": ["fresh"],
+                            },
+                            "note_pyramid": {
+                                "top": {
+                                    "shared": [],
+                                    "reference_only": ["pink pepper"],
+                                    "candidate_only": ["bergamot"],
+                                },
+                                "middle": {
+                                    "shared": ["rose"],
+                                    "reference_only": [],
+                                    "candidate_only": [],
+                                },
+                                "base": {
+                                    "shared": [],
+                                    "reference_only": ["oud"],
+                                    "candidate_only": ["musk"],
+                                },
+                            },
+                            "scent_family": {
+                                "shared": "floral",
+                                "reference_only": "unknown",
+                                "candidate_only": "unknown",
+                            },
+                        },
+                    },
+                    {
+                        "fragrance_edition_id": 4,
+                        "fragrance": "Bare Iris",
+                        "edition": "Bare Iris EDP",
+                        "concentration": "EDP",
+                        "catalog_kind": "real",
+                        "scent_match": {
+                            "method": "exact_cosine",
+                            "model_specific_score": 0.0,
+                            "score_basis": "Exact cosine over NosePrint Scent Profile embeddings; not a probability or percent-identical claim.",
+                            "strength_label": "incomplete",
+                        },
+                        "profile_comparison": {
+                            "main_accords": {
+                                "shared": "unknown",
+                                "reference_only": "unknown",
+                                "candidate_only": "unknown",
+                            },
+                            "note_pyramid": {
+                                "top": {
+                                    "shared": "unknown",
+                                    "reference_only": "unknown",
+                                    "candidate_only": "unknown",
+                                },
+                                "middle": {
+                                    "shared": "unknown",
+                                    "reference_only": "unknown",
+                                    "candidate_only": "unknown",
+                                },
+                                "base": {
+                                    "shared": "unknown",
+                                    "reference_only": "unknown",
+                                    "candidate_only": "unknown",
+                                },
+                            },
+                            "scent_family": {
+                                "shared": "unknown",
+                                "reference_only": "unknown",
+                                "candidate_only": "unknown",
+                            },
+                        },
+                    },
+                ],
+            )
+            self.assertNotIn("Sample Rose Load Test", matched.stdout)
+
+    def test_exact_scent_match_records_versioned_384_number_embeddings(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            connection = sqlite3.connect(database)
+            connection.row_factory = sqlite3.Row
+            try:
+                rows = connection.execute(
+                    """
+                    SELECT fragrance_edition_id, model, model_version,
+                           pipeline_version, dimensions, vector_json
+                    FROM scent_profile_embeddings
+                    ORDER BY fragrance_edition_id
+                    """
+                ).fetchall()
+            finally:
+                connection.close()
+            self.assertEqual([row["fragrance_edition_id"] for row in rows], [1, 2, 4])
+            for row in rows:
+                self.assertEqual(row["model"], "noseprint-hash-embedding-384")
+                self.assertEqual(row["model_version"], "1")
+                self.assertEqual(
+                    row["pipeline_version"], "scent-profile-serialization-v1"
+                )
+                self.assertEqual(row["dimensions"], 384)
+                self.assertEqual(len(json.loads(row["vector_json"])), 384)
+
+    def test_scent_match_labels_strong_and_surprising_profile_comparisons(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+            connection = sqlite3.connect(database)
+            try:
+                connection.executescript(
+                    """
+                    INSERT INTO fragrances (id, name, brand)
+                    VALUES
+                        (3, 'Twin Rose', 'Fixture House'),
+                        (4, 'Shadow Rose', 'Fixture House');
+                    INSERT INTO fragrance_editions
+                        (id, fragrance_id, name, concentration, catalog_kind)
+                    VALUES
+                        (5, 3, 'Twin Rose EDP', 'EDP', 'real'),
+                        (6, 4, 'Shadow Rose EDP', 'EDP', 'real');
+                    INSERT INTO scent_profiles
+                        (fragrance_edition_id, notes_json, main_accords_json,
+                         top_notes_json, middle_notes_json, base_notes_json, scent_family)
+                    VALUES
+                        (5, '["rose", "oud"]', '["floral", "woody"]',
+                         '["pink pepper"]', '["rose"]', '["oud"]', 'floral'),
+                        (6, '["rose", "oud"]', '["floral", "woody"]',
+                         '["pink pepper"]', '["rose"]', '["oud"]', 'amber');
+                    INSERT INTO source_records
+                        (dataset_id, source_row, fragrance_edition_id, original_values_json)
+                    VALUES
+                        ('fixture-real-v1', 5, 5, '{"Brand": "Fixture House"}'),
+                        ('fixture-real-v1', 6, 6, '{"Brand": "Fixture House"}');
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+                "--limit",
+                "2",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            results = json.loads(matched.stdout)["results"]
+            self.assertEqual(
+                [
+                    (
+                        result["fragrance"],
+                        result["scent_match"]["strength_label"],
+                        result["profile_comparison"]["scent_family"],
+                    )
+                    for result in results
+                ],
+                [
+                    (
+                        "Twin Rose",
+                        "strong",
+                        {
+                            "shared": "floral",
+                            "reference_only": "unknown",
+                            "candidate_only": "unknown",
+                        },
+                    ),
+                    (
+                        "Shadow Rose",
+                        "surprising",
+                        {
+                            "shared": "unknown",
+                            "reference_only": "floral",
+                            "candidate_only": "amber",
+                        },
+                    ),
+                ],
+            )
+
+    def test_non_scent_catalog_facts_do_not_change_exact_scent_match_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            before = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+            )
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    """
+                    UPDATE source_records
+                    SET original_values_json = ?
+                    WHERE fragrance_edition_id = 1
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "Brand": "Fixture House",
+                                "Description": "New expensive marketing copy.",
+                                "Price": "$999",
+                                "Bottle Size": "10 ml",
+                            }
+                        ),
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            after = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+            )
+
+            self.assertEqual(before.returncode, 0, before.stderr)
+            self.assertEqual(after.returncode, 0, after.stderr)
+            self.assertEqual(
+                json.loads(before.stdout)["results"],
+                json.loads(after.stdout)["results"],
+            )
+
+    def test_exact_scent_match_has_clear_empty_state_without_alternatives(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    "DELETE FROM scent_profiles WHERE fragrance_edition_id <> 2"
+                )
+                connection.execute(
+                    "DELETE FROM source_records WHERE fragrance_edition_id <> 2"
+                )
+                connection.execute("DELETE FROM fragrance_editions WHERE id <> 2")
+                connection.commit()
+            finally:
+                connection.close()
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            self.assertEqual(
+                json.loads(matched.stdout),
+                {
+                    "status": "no_matches",
+                    "reference": {
+                        "fragrance_edition_id": 2,
+                        "fragrance": "Sample Rose",
+                        "edition": "Sample Rose EDP",
+                        "concentration": "EDP",
+                    },
+                    "embedding": {
+                        "model": "noseprint-hash-embedding-384",
+                        "model_version": "1",
+                        "pipeline_version": "scent-profile-serialization-v1",
+                        "dimensions": 384,
+                        "runtime_device": "cpu",
+                    },
+                    "results": [],
+                    "message": "No other Real Catalog Fragrance Editions are available for exact cosine Scent Matches.",
+                },
+            )
+
     def test_shopper_search_gets_clear_empty_state_when_no_fragrance_matches(
         self,
     ) -> None:

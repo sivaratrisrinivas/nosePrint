@@ -4,6 +4,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -13,6 +14,10 @@ from typing import Any, Sequence
 EXIT_BLOCKED = 2
 MAX_SOURCE_BYTES = 50 * 1024 * 1024
 REQUIRED_AUDIT_CHECKS = {"license_chain", "provenance", "schema", "row_count", "quality"}
+EMBEDDING_DIMENSIONS = 384
+EMBEDDING_MODEL = "noseprint-hash-embedding-384"
+EMBEDDING_MODEL_VERSION = "1"
+SERIALIZATION_PIPELINE_VERSION = "scent-profile-serialization-v1"
 
 
 def _sha256(path: Path) -> str:
@@ -316,6 +321,15 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             base_notes_json TEXT,
             scent_family TEXT
         );
+        CREATE TABLE IF NOT EXISTS scent_profile_embeddings (
+            fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+            model TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            pipeline_version TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            runtime_device TEXT NOT NULL,
+            vector_json TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS source_records (
             dataset_id TEXT NOT NULL REFERENCES catalog_sources(dataset_id),
             source_row INTEGER NOT NULL,
@@ -598,6 +612,323 @@ def _scent_profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scent_matches(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    if not database.exists():
+        return _catalog_unavailable(database)
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        _create_embedding_schema(connection)
+        rows = connection.execute(
+            """
+            SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
+                   fe.name AS edition, fe.concentration, fe.catalog_kind,
+                   sp.notes_json, sp.main_accords_json, sp.top_notes_json,
+                   sp.middle_notes_json, sp.base_notes_json, sp.scent_family
+            FROM fragrance_editions AS fe
+            JOIN fragrances AS f ON f.id = fe.fragrance_id
+            JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
+            WHERE fe.catalog_kind = 'real'
+            ORDER BY fe.id
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        connection.close()
+        return _catalog_unavailable(database)
+
+    reference = next(
+        (row for row in rows if row["fragrance_edition_id"] == args.edition_id),
+        None,
+    )
+    if reference is None:
+        print(
+            json.dumps(
+                {
+                    "status": "not_found",
+                    "message": "No Real Catalog Fragrance Edition is available for that edition id.",
+                },
+                indent=2,
+            )
+        )
+        connection.close()
+        return 0
+
+    reference_vector = _embed_scent_profile(reference)
+    _record_embedding(connection, reference, reference_vector)
+    ranked_matches = []
+    for row in rows:
+        if row["fragrance_edition_id"] == reference["fragrance_edition_id"]:
+            continue
+        candidate_vector = _embed_scent_profile(row)
+        _record_embedding(connection, row, candidate_vector)
+        score = _cosine_similarity(reference_vector, candidate_vector)
+        ranked_matches.append(
+            {
+                "fragrance_edition_id": row["fragrance_edition_id"],
+                "fragrance": row["fragrance"],
+                "edition": row["edition"],
+                "concentration": row["concentration"],
+                "catalog_kind": row["catalog_kind"],
+                "scent_match": {
+                    "method": "exact_cosine",
+                    "model_specific_score": round(score, 2),
+                    "score_basis": (
+                        "Exact cosine over NosePrint Scent Profile embeddings; "
+                        "not a probability or percent-identical claim."
+                    ),
+                    "strength_label": _scent_match_strength(reference, row, score),
+                },
+                "profile_comparison": _profile_comparison(reference, row),
+            }
+        )
+    ranked_matches.sort(
+        key=lambda result: (
+            -result["scent_match"]["model_specific_score"],
+            result["fragrance"],
+            result["edition"],
+            result["fragrance_edition_id"],
+        )
+    )
+    limited_matches = ranked_matches[: args.limit]
+    response: dict[str, Any] = {
+        "status": "ok" if limited_matches else "no_matches",
+        "reference": {
+            "fragrance_edition_id": reference["fragrance_edition_id"],
+            "fragrance": reference["fragrance"],
+            "edition": reference["edition"],
+            "concentration": reference["concentration"],
+        },
+        "embedding": _embedding_metadata(),
+        "results": limited_matches,
+    }
+    if not limited_matches:
+        response["message"] = (
+            "No other Real Catalog Fragrance Editions are available for exact cosine Scent Matches."
+        )
+    connection.commit()
+    connection.close()
+    print(json.dumps(response, indent=2))
+    return 0
+
+
+def _create_embedding_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scent_profile_embeddings (
+            fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+            model TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            pipeline_version TEXT NOT NULL,
+            dimensions INTEGER NOT NULL,
+            runtime_device TEXT NOT NULL,
+            vector_json TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _record_embedding(
+    connection: sqlite3.Connection, row: sqlite3.Row, vector: list[float]
+) -> None:
+    metadata = _embedding_metadata()
+    connection.execute(
+        """
+        INSERT INTO scent_profile_embeddings
+            (fragrance_edition_id, model, model_version, pipeline_version,
+             dimensions, runtime_device, vector_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (fragrance_edition_id) DO UPDATE SET
+            model = excluded.model,
+            model_version = excluded.model_version,
+            pipeline_version = excluded.pipeline_version,
+            dimensions = excluded.dimensions,
+            runtime_device = excluded.runtime_device,
+            vector_json = excluded.vector_json
+        """,
+        (
+            row["fragrance_edition_id"],
+            metadata["model"],
+            metadata["model_version"],
+            metadata["pipeline_version"],
+            metadata["dimensions"],
+            metadata["runtime_device"],
+            json.dumps(vector),
+        ),
+    )
+
+
+def _embedding_metadata() -> dict[str, Any]:
+    return {
+        "model": EMBEDDING_MODEL,
+        "model_version": EMBEDDING_MODEL_VERSION,
+        "pipeline_version": SERIALIZATION_PIPELINE_VERSION,
+        "dimensions": EMBEDDING_DIMENSIONS,
+        "runtime_device": "cpu",
+    }
+
+
+def _embed_scent_profile(row: sqlite3.Row) -> list[float]:
+    vector = [0.0] * EMBEDDING_DIMENSIONS
+    for token in _serialize_scent_profile(row):
+        bucket = _embedding_bucket(token)
+        vector[bucket] += 1.0
+    return vector
+
+
+def _embedding_bucket(token: str) -> int:
+    digest = hashlib.sha256(
+        f"{EMBEDDING_MODEL_VERSION}:{token}".encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], "big") % EMBEDDING_DIMENSIONS
+
+
+def _serialize_scent_profile(row: sqlite3.Row) -> list[str]:
+    tokens: list[str] = []
+    tokens.extend(_json_tokens("notes", row["notes_json"]))
+    tokens.extend(_json_tokens("main_accord", row["main_accords_json"]))
+    tokens.extend(_json_tokens("top_note", row["top_notes_json"]))
+    tokens.extend(_json_tokens("middle_note", row["middle_notes_json"]))
+    tokens.extend(_json_tokens("base_note", row["base_notes_json"]))
+    scent_family = (row["scent_family"] or "").strip().casefold()
+    tokens.append(f"scent_family:{scent_family if scent_family else '<unknown>'}")
+    return tokens
+
+
+def _json_tokens(field: str, value: str | None) -> list[str]:
+    if value is None:
+        return [f"{field}:<unknown>"]
+    parsed = json.loads(value)
+    if not parsed:
+        return [f"{field}:<unknown>"]
+    return [f"{field}:{item.strip().casefold()}" for item in parsed if item.strip()]
+
+
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    dot_product = sum(
+        left_value * right_value for left_value, right_value in zip(left, right)
+    )
+    return dot_product / (left_norm * right_norm)
+
+
+def _scent_match_strength(
+    reference: sqlite3.Row, candidate: sqlite3.Row, score: float
+) -> str:
+    if _has_incomplete_profile_comparison_facts(reference) or _has_incomplete_profile_comparison_facts(
+        candidate
+    ):
+        return "incomplete"
+    if score >= 0.7 and _scent_families_differ(reference, candidate):
+        return "surprising"
+    if score >= 0.7:
+        return "strong"
+    return "weak"
+
+
+def _has_incomplete_profile_comparison_facts(row: sqlite3.Row) -> bool:
+    return (
+        _json_or_unknown(row["main_accords_json"]) == "unknown"
+        or _json_or_unknown(row["top_notes_json"]) == "unknown"
+        or _json_or_unknown(row["middle_notes_json"]) == "unknown"
+        or _json_or_unknown(row["base_notes_json"]) == "unknown"
+        or _value_or_unknown(row["scent_family"]) == "unknown"
+    )
+
+
+def _profile_comparison(
+    reference: sqlite3.Row, candidate: sqlite3.Row
+) -> dict[str, Any]:
+    return {
+        "main_accords": _compare_json_profile_facts(
+            reference["main_accords_json"], candidate["main_accords_json"]
+        ),
+        "note_pyramid": {
+            "top": _compare_json_profile_facts(
+                reference["top_notes_json"], candidate["top_notes_json"]
+            ),
+            "middle": _compare_json_profile_facts(
+                reference["middle_notes_json"], candidate["middle_notes_json"]
+            ),
+            "base": _compare_json_profile_facts(
+                reference["base_notes_json"], candidate["base_notes_json"]
+            ),
+        },
+        "scent_family": _compare_scent_family(
+            reference["scent_family"], candidate["scent_family"]
+        ),
+    }
+
+
+def _compare_json_profile_facts(
+    reference_value: str | None, candidate_value: str | None
+) -> dict[str, list[str] | str]:
+    reference_facts = _known_json_profile_facts(reference_value)
+    candidate_facts = _known_json_profile_facts(candidate_value)
+    if reference_facts is None or candidate_facts is None:
+        return {
+            "shared": "unknown",
+            "reference_only": "unknown",
+            "candidate_only": "unknown",
+        }
+    return {
+        "shared": sorted(reference_facts & candidate_facts),
+        "reference_only": sorted(reference_facts - candidate_facts),
+        "candidate_only": sorted(candidate_facts - reference_facts),
+    }
+
+
+def _known_json_profile_facts(value: str | None) -> set[str] | None:
+    parsed = _json_or_unknown(value)
+    if parsed == "unknown":
+        return None
+    return {item.strip().casefold() for item in parsed if item.strip()}
+
+
+def _compare_scent_family(
+    reference_value: str | None, candidate_value: str | None
+) -> dict[str, str]:
+    reference_family = _known_scent_family(reference_value)
+    candidate_family = _known_scent_family(candidate_value)
+    if reference_family is None or candidate_family is None:
+        return {
+            "shared": "unknown",
+            "reference_only": "unknown",
+            "candidate_only": "unknown",
+        }
+    if reference_family == candidate_family:
+        return {
+            "shared": reference_family,
+            "reference_only": "unknown",
+            "candidate_only": "unknown",
+        }
+    return {
+        "shared": "unknown",
+        "reference_only": reference_family,
+        "candidate_only": candidate_family,
+    }
+
+
+def _known_scent_family(value: str | None) -> str | None:
+    family = _value_or_unknown(value)
+    if family == "unknown":
+        return None
+    return family.strip().casefold()
+
+
+def _scent_families_differ(reference: sqlite3.Row, candidate: sqlite3.Row) -> bool:
+    reference_family = _known_scent_family(reference["scent_family"])
+    candidate_family = _known_scent_family(candidate["scent_family"])
+    return (
+        reference_family is not None
+        and candidate_family is not None
+        and reference_family != candidate_family
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="noseprint-catalog")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -651,6 +982,15 @@ def _parser() -> argparse.ArgumentParser:
     scent_profile.add_argument("--database", required=True)
     scent_profile.add_argument("--edition-id", required=True, type=int)
     scent_profile.set_defaults(handler=_scent_profile)
+
+    scent_matches = commands.add_parser(
+        "scent-matches",
+        help="Find exact-cosine Scent Matches for a Real Catalog Fragrance Edition",
+    )
+    scent_matches.add_argument("--database", required=True)
+    scent_matches.add_argument("--edition-id", required=True, type=int)
+    scent_matches.add_argument("--limit", type=int, default=10)
+    scent_matches.set_defaults(handler=_scent_matches)
     return parser
 
 

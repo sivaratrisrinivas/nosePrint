@@ -83,3 +83,48 @@ python3 -m noseprint.catalog scent-profile \
 The Scent Profile contains main accords, note pyramid, and scent family. Brand,
 price, bottle size, and marketing copy stay outside the comparison profile.
 Missing scent facts are displayed as `unknown`; NosePrint does not guess them.
+
+## Find exact Scent Matches
+
+Use a selected Real Catalog Fragrance Edition as the reference for exact
+cosine matching:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1 \
+  --limit 10
+```
+
+The command returns ranked Real Catalog alternatives and excludes the selected
+edition from its own result list. It also excludes Scale-Test Catalog rows from
+this shopper path, even if those rows exist in SQLite.
+
+Each Scent Match includes:
+
+- a calibrated `strength_label` such as `strong`, `weak`, `incomplete`, or
+  `surprising`
+- a `model_specific_score` with a `score_basis` that says the number is exact
+  cosine over NosePrint Scent Profile embeddings, not a probability or
+  percent-identical claim
+- a `profile_comparison` showing shared, reference-only, and candidate-only
+  main accords, note-pyramid facts, and scent family facts
+
+The embedding metadata is included in the response:
+
+- `model`: `noseprint-hash-embedding-384`
+- `model_version`: `1`
+- `pipeline_version`: `scent-profile-serialization-v1`
+- `dimensions`: `384`
+- `runtime_device`: `cpu`
+
+NosePrint serializes only Scent Profile facts: notes, main accords, note
+pyramid, and scent family. Missing fields receive a stable unknown marker rather
+than guessed facts. Brand, price, bottle size, marketing copy, and Wear Profile
+facts do not change the model-specific exact-cosine score or ordering. Profile
+Comparisons are derived from normalized SQLite catalog facts, not from generated
+claims about why the model ranked a result.
+
+The generated 384-number embeddings are recorded in SQLite with their model and
+pipeline versions. Later search indexes can be rebuilt from these catalog-owned
+facts instead of becoming a second source of truth.
