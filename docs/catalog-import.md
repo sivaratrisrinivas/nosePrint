@@ -51,3 +51,35 @@ python3 -m noseprint.catalog inspect-quarantine --database var/noseprint.sqlite3
 ```
 
 The first command shows accepted Real Catalog records with their source identity and original name. The second shows rejected and quarantined rows with clear reasons.
+
+## Browse the Real Catalog
+
+After SQLite has an imported Real Catalog, search by Fragrance name:
+
+```bash
+python3 -m noseprint.catalog browse \
+  --database var/noseprint.sqlite3 \
+  --query "rose"
+```
+
+The response lists matching Real Catalog Fragrance Editions separately. For
+example, an EDT and EDP can appear as distinct results with different
+`fragrance_edition_id` values. Scale-Test Catalog records are not returned by
+this shopping path.
+
+If no Fragrance name matches, the command returns `status: "no_matches"` with a
+plain-language message. If the database has not been imported yet, the command
+exits with code `2` and explains that the Real Catalog must be imported into
+SQLite first.
+
+Use a returned `fragrance_edition_id` to inspect the selected Scent Profile:
+
+```bash
+python3 -m noseprint.catalog scent-profile \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1
+```
+
+The Scent Profile contains main accords, note pyramid, and scent family. Brand,
+price, bottle size, and marketing copy stay outside the comparison profile.
+Missing scent facts are displayed as `unknown`; NosePrint does not guess them.

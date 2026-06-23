@@ -477,6 +477,127 @@ def _inspect_quarantine(args: argparse.Namespace) -> int:
     return 0
 
 
+def _catalog_unavailable(database: Path) -> int:
+    print(
+        "Catalog unavailable: import a Real Catalog into SQLite first, "
+        f"then pass it with --database {database}.",
+        file=sys.stderr,
+    )
+    return EXIT_BLOCKED
+
+
+def _browse(args: argparse.Namespace) -> int:
+    query = args.query.strip()
+    database = Path(args.database)
+    if not database.exists():
+        return _catalog_unavailable(database)
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        try:
+            rows = connection.execute(
+                """
+                SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
+                       fe.name AS edition, fe.concentration
+                FROM fragrance_editions AS fe
+                JOIN fragrances AS f ON f.id = fe.fragrance_id
+                JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
+                WHERE fe.catalog_kind = 'real'
+                  AND f.name LIKE ? COLLATE NOCASE
+                ORDER BY f.name, fe.id
+                """,
+                (f"%{query}%",),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return _catalog_unavailable(database)
+    finally:
+        connection.close()
+    results = [dict(row) for row in rows]
+    response: dict[str, Any] = {
+        "status": "ok" if results else "no_matches",
+        "query": query,
+    }
+    if not results:
+        response["message"] = (
+            "No Real Catalog Fragrance Editions matched that Fragrance name."
+        )
+    response["results"] = results
+    print(json.dumps(response, indent=2))
+    return 0
+
+
+def _json_or_unknown(value: str | None) -> list[str] | str:
+    if value is None:
+        return "unknown"
+    parsed = json.loads(value)
+    return parsed if parsed else "unknown"
+
+
+def _value_or_unknown(value: str | None) -> str:
+    return value if value else "unknown"
+
+
+def _scent_profile(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    if not database.exists():
+        return _catalog_unavailable(database)
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        try:
+            row = connection.execute(
+                """
+                SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
+                       fe.name AS edition, fe.concentration,
+                       sp.main_accords_json, sp.top_notes_json,
+                       sp.middle_notes_json, sp.base_notes_json, sp.scent_family
+                FROM fragrance_editions AS fe
+                JOIN fragrances AS f ON f.id = fe.fragrance_id
+                JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
+                WHERE fe.catalog_kind = 'real'
+                  AND fe.id = ?
+                """,
+                (args.edition_id,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return _catalog_unavailable(database)
+    finally:
+        connection.close()
+    if row is None:
+        print(
+            json.dumps(
+                {
+                    "status": "not_found",
+                    "message": "No Real Catalog Fragrance Edition is available for that edition id.",
+                },
+                indent=2,
+            )
+        )
+        return 0
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "fragrance_edition_id": row["fragrance_edition_id"],
+                "fragrance": row["fragrance"],
+                "edition": row["edition"],
+                "concentration": row["concentration"],
+                "scent_profile": {
+                    "main_accords": _json_or_unknown(row["main_accords_json"]),
+                    "note_pyramid": {
+                        "top": _json_or_unknown(row["top_notes_json"]),
+                        "middle": _json_or_unknown(row["middle_notes_json"]),
+                        "base": _json_or_unknown(row["base_notes_json"]),
+                    },
+                    "scent_family": _value_or_unknown(row["scent_family"]),
+                },
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="noseprint-catalog")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -516,6 +637,20 @@ def _parser() -> argparse.ArgumentParser:
     )
     inspect_quarantine.add_argument("--database", required=True)
     inspect_quarantine.set_defaults(handler=_inspect_quarantine)
+
+    browse = commands.add_parser(
+        "browse", help="Search Real Catalog Fragrance Editions by Fragrance name"
+    )
+    browse.add_argument("--database", required=True)
+    browse.add_argument("--query", required=True)
+    browse.set_defaults(handler=_browse)
+
+    scent_profile = commands.add_parser(
+        "scent-profile", help="Inspect a Real Catalog Fragrance Edition Scent Profile"
+    )
+    scent_profile.add_argument("--database", required=True)
+    scent_profile.add_argument("--edition-id", required=True, type=int)
+    scent_profile.set_defaults(handler=_scent_profile)
     return parser
 
 

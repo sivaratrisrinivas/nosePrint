@@ -1,12 +1,35 @@
 # NosePrint
 
-NosePrint is a fragrance discovery project that runs on your own computer. Its long-term goal is to help someone start with a fragrance they know—or describe a scent they want—and find similar choices.
+NosePrint is a local-first fragrance discovery project. Its goal is to help
+someone start with a Fragrance they already know, or describe the kind of scent
+they want, and find nearby Fragrance Editions using clear, traceable scent
+facts.
 
-## What is built today
+## What
 
-The first part of NosePrint is complete: a safety check for catalog data.
+NosePrint separates three ideas that are easy to blur:
 
-Before fragrance information can enter NosePrint, the project checks:
+- **Fragrance**: the named scent product people recognize.
+- **Fragrance Edition**: a specific concentration or release of that Fragrance,
+  such as EDT, EDP, Parfum, or Extrait.
+- **Scent Profile**: the scent-only facts used for comparison: main accords,
+  note pyramid, and scent family.
+
+The current application is a Python command-line workflow backed by SQLite. It
+can audit a candidate data source, import accepted Real Catalog records, browse
+Fragrance Editions by Fragrance name, and inspect a selected Scent Profile.
+
+SQLite is the catalog source of truth. Future search indexes, including vector
+search, should be rebuildable helpers rather than competing master copies.
+
+## Why
+
+Fragrance recommendation can look confident while quietly mixing trustworthy
+facts, unclear source material, marketing language, and generated test data.
+NosePrint is built to keep those things separate.
+
+Before fragrance information can enter the Real Catalog automatically, the
+project checks:
 
 - where the information came from;
 - who published it;
@@ -14,47 +37,81 @@ Before fragrance information can enter NosePrint, the project checks:
 - whether the file has the expected columns and number of rows;
 - whether missing, repeated, or broken rows are handled honestly.
 
-Only a file that passes every check can enter the Real Catalog automatically. Accepted information is stored in a small local database. NosePrint keeps both the original values and the cleaned values, so every change can be traced later.
-
-## Why this matters
-
-A search tool can return answers quickly, but speed does not make questionable information trustworthy. NosePrint checks the source first so it does not present copied, unclear, or made-up fragrance facts as real shopping information.
-
-The proposed 2,191-row Perfume Recommendation Dataset currently has an **inconclusive** result. Its page says the data is public domain, but it does not show where all descriptions, notes, and image links originally came from or whether the publisher could give reuse permission for them. NosePrint therefore blocks automatic import. This is the expected safe result, not an error to work around.
-
-For a personal side project, the owner can still choose to accept that risk explicitly. NosePrint supports that with an `--accept-owner-risk` import option. This does not pretend the audit passed; it records that the owner knowingly chose to use an inconclusive source.
+The proposed 2,191-row Perfume Recommendation Dataset currently has an
+**inconclusive** result. Its page says the data is public domain, but it does not
+show where all descriptions, notes, and image links originally came from or
+whether the publisher could give reuse permission for them. NosePrint therefore
+blocks automatic import by default. For this personal side project, the owner can
+explicitly accept that risk without pretending the audit passed.
 
 Read the full [audit result](docs/audits/perfume-recommendation-dataset-v1.md).
 
-## How it works
-
-The catalog tool has four commands:
-
-1. `audit` checks a source file and writes a report.
-2. `import` accepts only the exact file that received a passing report, unless the owner explicitly accepts an inconclusive risk.
-3. `inspect` shows accepted Real Catalog records and where they came from.
-4. `inspect-quarantine` shows rows kept out of the catalog and explains why.
-
-The import is safe to run more than once: it will not create extra copies of the same fragrance. Missing names or brands are rejected, missing scent notes are set aside for review, and repeated fragrance editions are counted and skipped.
-
-See [how to run the audit and import](docs/catalog-import.md) for complete commands.
-
-## Run the checks
+## How
 
 NosePrint currently needs only Python 3; there are no extra packages to install.
+Run the test suite with:
 
 ```bash
 python3 -m unittest discover -v
 ```
 
-The tests use small made-up files. They prove that a failed check blocks the import, a valid file can be imported, owner-accepted inconclusive imports stay visibly marked, original values remain traceable, questionable rows stay out, and running the import twice does not duplicate records.
+The catalog workflow has six commands:
 
-## Learn from this step
+1. `audit` checks a candidate Real Catalog source and writes a report.
+2. `import` accepts only the exact file that received a passing report, unless
+   the owner explicitly accepts an inconclusive risk.
+3. `inspect` shows accepted Real Catalog records and where they came from.
+4. `inspect-quarantine` shows rows kept out of the catalog and explains why.
+5. `browse` searches Real Catalog Fragrance Editions by Fragrance name.
+6. `scent-profile` shows the selected Fragrance Edition's Scent Profile.
 
-After each completed implementation issue, the maintainer asks for a short explanation using `srini-personal-teacher`, written in language a curious 12-year-old can understand. These learning notes are for the local teaching session and should not be committed with product changes unless explicitly requested.
+See [how to run the catalog workflow](docs/catalog-import.md) for complete
+commands.
 
-Generated learning folders such as `learning-sessions/`, `learning-records/`, `lessons/`, and `reference/` are ignored by git for new files.
+### Example browsing flow
 
-## What comes next
+After import, search the Real Catalog by Fragrance name:
 
-The next planned step is catalog browsing. It will let someone search approved Real Catalog records by fragrance name, choose a specific fragrance edition, and view its scent information. It will not weaken or bypass the source check added here.
+```bash
+python3 -m noseprint.catalog browse \
+  --database var/noseprint.sqlite3 \
+  --query "rose"
+```
+
+Use a returned `fragrance_edition_id` to inspect the Scent Profile:
+
+```bash
+python3 -m noseprint.catalog scent-profile \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1
+```
+
+The Scent Profile output includes main accords, note pyramid, and scent family.
+Brand, price, bottle size, and marketing copy are not part of that comparison
+profile. Missing scent facts are shown as `unknown` instead of being guessed.
+
+## Current Guarantees
+
+- Inconclusive catalog audits are blocked unless the owner explicitly accepts
+  the risk.
+- The accepted Real Catalog is stored in SQLite with source traceability.
+- Imports are idempotent and do not duplicate existing Fragrance Editions.
+- Malformed rows are rejected, missing note rows are quarantined, and duplicate
+  Fragrance Editions are skipped deterministically.
+- Shopping browse results only include Real Catalog records, not Scale-Test
+  Catalog records.
+- Missing scent facts are displayed as `unknown`; NosePrint does not guess them.
+
+## Learning Notes
+
+This repository also contains local learning material created while building the
+project. `MISSION.md`, `RESOURCES.md`, `NOTES.md`, `lessons/`, `reference/`, and
+`learning-sessions/` capture teaching context and explanations for the project
+owner. Product code should remain usable without reading those learning files.
+
+## Direction
+
+The next project step is richer matching: use the truthful SQLite Real Catalog as
+the base for scent comparison and later vector-search experiments. The important
+rule remains the same: search can get faster and smarter, but catalog facts must
+stay traceable and honest.

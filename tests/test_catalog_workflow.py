@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,158 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class CatalogWorkflowTests(unittest.TestCase):
+    def test_shopper_searches_real_catalog_and_sees_distinct_fragrance_editions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            searched = self.run_catalog(
+                "browse",
+                "--database",
+                str(database),
+                "--query",
+                "sample rose",
+            )
+
+            self.assertEqual(searched.returncode, 0, searched.stderr)
+            self.assertEqual(
+                json.loads(searched.stdout),
+                {
+                    "status": "ok",
+                    "query": "sample rose",
+                    "results": [
+                        {
+                            "fragrance_edition_id": 1,
+                            "fragrance": "Sample Rose",
+                            "edition": "Sample Rose EDT",
+                            "concentration": "EDT",
+                        },
+                        {
+                            "fragrance_edition_id": 2,
+                            "fragrance": "Sample Rose",
+                            "edition": "Sample Rose EDP",
+                            "concentration": "EDP",
+                        },
+                    ],
+                },
+            )
+
+    def test_shopper_selects_fragrance_edition_and_inspects_scent_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            inspected = self.run_catalog(
+                "scent-profile",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+            )
+
+            self.assertEqual(inspected.returncode, 0, inspected.stderr)
+            profile = json.loads(inspected.stdout)
+            self.assertEqual(
+                profile,
+                {
+                    "status": "ok",
+                    "fragrance_edition_id": 2,
+                    "fragrance": "Sample Rose",
+                    "edition": "Sample Rose EDP",
+                    "concentration": "EDP",
+                    "scent_profile": {
+                        "main_accords": ["floral", "woody"],
+                        "note_pyramid": {
+                            "top": ["pink pepper"],
+                            "middle": ["rose"],
+                            "base": ["oud"],
+                        },
+                        "scent_family": "floral",
+                    },
+                },
+            )
+            self.assertNotIn("brand", profile["scent_profile"])
+            self.assertNotIn("description", json.dumps(profile).casefold())
+            self.assertNotIn("price", json.dumps(profile).casefold())
+            self.assertNotIn("bottle", json.dumps(profile).casefold())
+
+    def test_shopper_search_gets_clear_empty_state_when_no_fragrance_matches(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            searched = self.run_catalog(
+                "browse",
+                "--database",
+                str(database),
+                "--query",
+                "missing amber",
+            )
+
+            self.assertEqual(searched.returncode, 0, searched.stderr)
+            self.assertEqual(
+                json.loads(searched.stdout),
+                {
+                    "status": "no_matches",
+                    "query": "missing amber",
+                    "message": "No Real Catalog Fragrance Editions matched that Fragrance name.",
+                    "results": [],
+                },
+            )
+
+    def test_shopper_sees_unknown_for_missing_scent_profile_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            inspected = self.run_catalog(
+                "scent-profile",
+                "--database",
+                str(database),
+                "--edition-id",
+                "4",
+            )
+
+            self.assertEqual(inspected.returncode, 0, inspected.stderr)
+            self.assertEqual(
+                json.loads(inspected.stdout)["scent_profile"],
+                {
+                    "main_accords": "unknown",
+                    "note_pyramid": {
+                        "top": "unknown",
+                        "middle": "unknown",
+                        "base": "unknown",
+                    },
+                    "scent_family": "unknown",
+                },
+            )
+
+    def test_shopper_gets_clear_unavailable_state_before_catalog_is_imported(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "missing.sqlite3"
+
+            searched = self.run_catalog(
+                "browse",
+                "--database",
+                str(database),
+                "--query",
+                "rose",
+            )
+
+            self.assertEqual(searched.returncode, 2)
+            self.assertIn("Catalog unavailable", searched.stderr)
+            self.assertIn("import", searched.stderr)
+            self.assertNotIn("no such table", searched.stderr)
+            self.assertNotIn("Traceback", searched.stderr)
+
     def test_invalid_manifest_fails_without_exposing_a_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory)
@@ -437,6 +590,93 @@ class CatalogWorkflowTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
+
+    def create_browse_fixture(self, database: Path) -> None:
+        connection = sqlite3.connect(database)
+        try:
+            connection.executescript(
+                """
+                PRAGMA foreign_keys = ON;
+                CREATE TABLE catalog_sources (
+                    dataset_id TEXT PRIMARY KEY,
+                    download_url TEXT NOT NULL,
+                    publisher TEXT NOT NULL,
+                    claimed_license TEXT NOT NULL,
+                    audit_report_json TEXT NOT NULL,
+                    owner_accepted_risk INTEGER NOT NULL DEFAULT 0,
+                    risk_acceptance_note TEXT
+                );
+                CREATE TABLE fragrances (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    brand TEXT NOT NULL,
+                    UNIQUE (name, brand)
+                );
+                CREATE TABLE fragrance_editions (
+                    id INTEGER PRIMARY KEY,
+                    fragrance_id INTEGER NOT NULL REFERENCES fragrances(id),
+                    name TEXT NOT NULL,
+                    concentration TEXT,
+                    catalog_kind TEXT NOT NULL CHECK (catalog_kind IN ('real', 'scale-test')),
+                    UNIQUE (fragrance_id, name)
+                );
+                CREATE TABLE scent_profiles (
+                    fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+                    notes_json TEXT NOT NULL,
+                    main_accords_json TEXT,
+                    top_notes_json TEXT,
+                    middle_notes_json TEXT,
+                    base_notes_json TEXT,
+                    scent_family TEXT
+                );
+                CREATE TABLE source_records (
+                    dataset_id TEXT NOT NULL REFERENCES catalog_sources(dataset_id),
+                    source_row INTEGER NOT NULL,
+                    fragrance_edition_id INTEGER NOT NULL REFERENCES fragrance_editions(id),
+                    original_values_json TEXT NOT NULL,
+                    PRIMARY KEY (dataset_id, source_row)
+                );
+                INSERT INTO catalog_sources
+                    (dataset_id, download_url, publisher, claimed_license, audit_report_json)
+                VALUES
+                    ('fixture-real-v1', 'https://example.test/real.csv',
+                     'Fixture Publisher', 'CC0-1.0', '{}');
+                INSERT INTO fragrances (id, name, brand)
+                VALUES
+                    (1, 'Sample Rose', 'Fixture House'),
+                    (2, 'Bare Iris', 'Fixture House');
+                INSERT INTO fragrance_editions
+                    (id, fragrance_id, name, concentration, catalog_kind)
+                VALUES
+                    (1, 1, 'Sample Rose EDT', 'EDT', 'real'),
+                    (2, 1, 'Sample Rose EDP', 'EDP', 'real'),
+                    (3, 1, 'Sample Rose Load Test', 'EDP', 'scale-test'),
+                    (4, 2, 'Bare Iris EDP', 'EDP', 'real');
+                INSERT INTO scent_profiles
+                    (fragrance_edition_id, notes_json, main_accords_json,
+                     top_notes_json, middle_notes_json, base_notes_json, scent_family)
+                VALUES
+                    (1, '["rose", "bergamot"]', '["floral", "fresh"]',
+                     '["bergamot"]', '["rose"]', '["musk"]', 'floral'),
+                    (2, '["rose", "oud"]', '["floral", "woody"]',
+                     '["pink pepper"]', '["rose"]', '["oud"]', 'floral'),
+                    (3, '["metal"]', '["synthetic"]',
+                     '["metal"]', '["metal"]', '["metal"]', 'synthetic'),
+                    (4, '["iris"]', NULL, NULL, NULL, NULL, NULL);
+                INSERT INTO source_records
+                    (dataset_id, source_row, fragrance_edition_id, original_values_json)
+                VALUES
+                    ('fixture-real-v1', 2, 1,
+                     '{"Brand": "Fixture House", "Description": "A bright rose story.", "Price": "$80", "Bottle Size": "50 ml"}'),
+                    ('fixture-real-v1', 3, 2,
+                     '{"Brand": "Fixture House", "Description": "A deeper rose story.", "Price": "$110", "Bottle Size": "100 ml"}'),
+                    ('fixture-real-v1', 4, 4,
+                     '{"Brand": "Fixture House", "Description": "Sparse iris copy.", "Price": "", "Bottle Size": ""}');
+                """
+            )
+            connection.commit()
+        finally:
+            connection.close()
 
 
 if __name__ == "__main__":
