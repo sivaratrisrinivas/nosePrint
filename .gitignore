@@ -5,3 +5,9 @@ __pycache__/
 *.pem
 *.key
 var/
+
+# Local learning artifacts are for the teaching session, not issue commits.
+learning-sessions/
+learning-records/
+lessons/
+reference/

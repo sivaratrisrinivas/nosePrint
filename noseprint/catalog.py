@@ -69,7 +69,23 @@ def _audit(args: argparse.Namespace) -> int:
 
 def _import_catalog(args: argparse.Namespace) -> int:
     report = json.loads(Path(args.audit_report).read_text(encoding="utf-8"))
-    if not _report_passes(report):
+    owner_accepted_risk = bool(args.accept_owner_risk)
+    risk_note = (args.risk_note or "").strip()
+    if owner_accepted_risk:
+        if len(risk_note) < 20:
+            print(
+                "Import blocked: owner risk acceptance needs a clear risk note.",
+                file=sys.stderr,
+            )
+            return EXIT_BLOCKED
+        if not _report_owner_accepted_importable(report):
+            print(
+                "Import blocked: owner risk acceptance still requires a valid "
+                "inconclusive audit with matching schema and row count.",
+                file=sys.stderr,
+            )
+            return EXIT_BLOCKED
+    elif not _report_passes(report):
         print("Import blocked: audit verdict is not PASSED.", file=sys.stderr)
         return EXIT_BLOCKED
     source_path = Path(args.source)
@@ -92,16 +108,20 @@ def _import_catalog(args: argparse.Namespace) -> int:
     dataset = report["dataset"]
     try:
         _create_schema(connection)
+        _ensure_catalog_source_risk_columns(connection)
         connection.execute(
             """
             INSERT INTO catalog_sources
-                (dataset_id, download_url, publisher, claimed_license, audit_report_json)
-            VALUES (?, ?, ?, ?, ?)
+                (dataset_id, download_url, publisher, claimed_license, audit_report_json,
+                 owner_accepted_risk, risk_acceptance_note)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (dataset_id) DO UPDATE SET
                 download_url = excluded.download_url,
                 publisher = excluded.publisher,
                 claimed_license = excluded.claimed_license,
-                audit_report_json = excluded.audit_report_json
+                audit_report_json = excluded.audit_report_json,
+                owner_accepted_risk = excluded.owner_accepted_risk,
+                risk_acceptance_note = excluded.risk_acceptance_note
             """,
             (
                 dataset["id"],
@@ -109,6 +129,8 @@ def _import_catalog(args: argparse.Namespace) -> int:
                 dataset["publisher"],
                 dataset["claimed_license"],
                 json.dumps(report, sort_keys=True),
+                1 if owner_accepted_risk else 0,
+                risk_note if owner_accepted_risk else None,
             ),
         )
         with source_path.open("r", encoding="utf-8-sig", newline="") as source:
@@ -246,6 +268,18 @@ def _report_passes(report: dict[str, Any]) -> bool:
     )
 
 
+def _report_owner_accepted_importable(report: dict[str, Any]) -> bool:
+    checks = report.get("checks", {})
+    return (
+        report.get("verdict") == "inconclusive"
+        and set(checks) == REQUIRED_AUDIT_CHECKS
+        and checks.get("schema") is True
+        and checks.get("row_count") is True
+        and bool(report.get("observed", {}).get("source_sha256"))
+        and isinstance(report.get("dataset"), dict)
+    )
+
+
 def _create_schema(connection: sqlite3.Connection) -> None:
     connection.executescript(
         """
@@ -255,7 +289,9 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             download_url TEXT NOT NULL,
             publisher TEXT NOT NULL,
             claimed_license TEXT NOT NULL,
-            audit_report_json TEXT NOT NULL
+            audit_report_json TEXT NOT NULL,
+            owner_accepted_risk INTEGER NOT NULL DEFAULT 0,
+            risk_acceptance_note TEXT
         );
         CREATE TABLE IF NOT EXISTS fragrances (
             id INTEGER PRIMARY KEY,
@@ -299,6 +335,27 @@ def _create_schema(connection: sqlite3.Connection) -> None:
         );
         """
     )
+
+
+def _ensure_catalog_source_risk_columns(connection: sqlite3.Connection) -> None:
+    existing_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(catalog_sources)").fetchall()
+    }
+    if "owner_accepted_risk" not in existing_columns:
+        connection.execute(
+            """
+            ALTER TABLE catalog_sources
+            ADD COLUMN owner_accepted_risk INTEGER NOT NULL DEFAULT 0
+            """
+        )
+    if "risk_acceptance_note" not in existing_columns:
+        connection.execute(
+            """
+            ALTER TABLE catalog_sources
+            ADD COLUMN risk_acceptance_note TEXT
+            """
+        )
 
 
 def _record_disposition(
@@ -436,6 +493,18 @@ def _parser() -> argparse.ArgumentParser:
     import_catalog.add_argument("--audit-report", required=True)
     import_catalog.add_argument("--source", required=True)
     import_catalog.add_argument("--database", required=True)
+    import_catalog.add_argument(
+        "--accept-owner-risk",
+        action="store_true",
+        help=(
+            "Import an inconclusive source only after the project owner accepts "
+            "the unproven license, provenance, and quality risk"
+        ),
+    )
+    import_catalog.add_argument(
+        "--risk-note",
+        help="Plain-language note explaining why the owner accepted the risk",
+    )
     import_catalog.set_defaults(handler=_import_catalog)
 
     inspect = commands.add_parser("inspect", help="Inspect imported Real Catalog records")

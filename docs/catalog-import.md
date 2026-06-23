@@ -28,6 +28,21 @@ The source SHA-256 must match the audited file. Accepted rows become separate Fr
 
 The command reports `accepted`, `rejected`, `transformed`, `duplicates`, and `quarantined` counts. Re-running the same import does not duplicate catalog records.
 
+## Import after the owner accepts an inconclusive risk
+
+For a personal side project, you may decide to use a source even when the audit is inconclusive. Do not change the audit verdict to `passed`. Keep the truth visible and import with an explicit owner-risk note:
+
+```bash
+python3 -m noseprint.catalog import \
+  --audit-report /tmp/noseprint-audit-report.json \
+  --source /path/to/the-same-candidate.csv \
+  --database var/noseprint.sqlite3 \
+  --accept-owner-risk \
+  --risk-note "Personal side project: accept inconclusive CC0/provenance risk."
+```
+
+This still checks that the source file matches the audited file and that the schema and row count match the manifest. The database records that the project owner accepted the risk, so the data is usable without pretending the audit proved more than it did.
+
 ## Inspect the result
 
 ```bash
