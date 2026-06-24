@@ -1,40 +1,41 @@
 # NosePrint
 
-NosePrint is a local-first fragrance discovery project. Its goal is to help
-someone start with a Fragrance they already know, or describe the kind of scent
-they want, and find nearby Fragrance Editions using clear, traceable scent
-facts.
+NosePrint is a local-first fragrance discovery project. It helps someone start
+with a Fragrance they already know, or describe the kind of scent they want, and
+find nearby Fragrance Editions using clear scent facts.
 
 ## What
 
-NosePrint separates three ideas that are easy to blur:
+NosePrint is a small Python command-line app backed by SQLite. It can:
+
+- audit and import fragrance data into a Real Catalog;
+- browse Fragrance Editions by name;
+- show the Scent Profile for a selected Fragrance Edition;
+- find Scent Matches from either a selected Fragrance Edition or a beginner
+  Scent Request;
+- filter or explain results with Comparable Prices and Wear Profile facts;
+- rebuild and check a local Qdrant-style search index;
+- evaluate retrieval quality and benchmark larger generated data.
+
+The three core ideas are:
 
 - **Fragrance**: the named scent product people recognize.
-- **Fragrance Edition**: a specific concentration or release of that Fragrance,
-  such as EDT, EDP, Parfum, or Extrait.
-- **Scent Profile**: the scent-only facts used for comparison: main accords,
-  note pyramid, and scent family.
-
-The current application is a Python command-line workflow backed by SQLite. It
-can audit a candidate data source, import accepted Real Catalog records, browse
-Fragrance Editions by Fragrance name, inspect a selected Scent Profile, interpret
-a beginner Scent Request, find exact-cosine Scent Matches for a selected
-Fragrance Edition or confirmed Scent Request, and serve selected-edition matches
-through a rebuildable Qdrant-style ANN index. Scent Matches can also be annotated
-and filtered by Comparable Prices and Wear Profile facts without changing scent
-similarity.
-
-SQLite is the catalog source of truth. Future search indexes, including vector
-search, should be rebuildable helpers rather than competing master copies.
+- **Fragrance Edition**: a specific release of that Fragrance, such as EDT, EDP,
+  Parfum, or Extrait.
+- **Scent Profile**: the scent-only facts used for comparison: notes, main
+  accords, note pyramid, and scent family.
 
 ## Why
 
-Fragrance recommendation can look confident while quietly mixing trustworthy
-facts, unclear source material, marketing language, and generated test data.
-NosePrint is built to keep those things separate.
+Fragrance recommendations can sound confident while mixing real facts, unclear
+source material, marketing copy, prices, and generated test data. NosePrint is
+built to keep those things separate.
 
-Before fragrance information can enter the Real Catalog automatically, the
-project checks:
+SQLite is the source of truth. Search indexes are helpful maps, not the catalog
+itself. If an index is missing, stale, unreadable, or wrong, it can be rebuilt
+from SQLite without losing catalog data.
+
+Before fragrance information enters the Real Catalog, the project checks:
 
 - where the information came from;
 - who published it;
@@ -42,27 +43,33 @@ project checks:
 - whether the file has the expected columns and number of rows;
 - whether missing, repeated, or broken rows are handled honestly.
 
-The proposed 2,191-row Perfume Recommendation Dataset currently has an
-**inconclusive** result. Its page says the data is public domain, but it does not
-show where all descriptions, notes, and image links originally came from or
-whether the publisher could give reuse permission for them. NosePrint therefore
-blocks automatic import by default. For this personal side project, the owner can
+The proposed 2,191-row Perfume Recommendation Dataset has an **inconclusive**
+audit. Its page says the data is public domain, but it does not show where all
+descriptions, notes, and image links originally came from. NosePrint blocks
+automatic import by default. For this personal side project, the owner can
 explicitly accept that risk without pretending the audit passed.
 
 Read the full [audit result](docs/audits/perfume-recommendation-dataset-v1.md).
 
 ## How
 
-NosePrint currently needs only Python 3; there are no extra packages to install,
-no account system to configure, and no public deployment step. The local
-application starts through the Python CLI and uses SQLite plus rebuildable local
-JSON index files:
+NosePrint needs only Python 3. There are no extra packages, no account system,
+and no public deployment step.
 
 ```bash
 python3 -m unittest discover -v
 ```
 
-Check local runtime health before serving ANN Scent Matches:
+The normal flow is:
+
+1. Audit a candidate source.
+2. Import accepted Real Catalog records into SQLite.
+3. Browse or search using Scent Profiles.
+4. Build a local Qdrant-style index when faster search is needed.
+5. Check health before using that index.
+
+Health checks tell you whether SQLite has Real Catalog data, whether the
+embedding runtime is using CPU or CUDA, and whether the index is fresh:
 
 ```bash
 python3 -m noseprint.catalog qdrant-health \
@@ -70,11 +77,7 @@ python3 -m noseprint.catalog qdrant-health \
   --index var/qdrant-index.json
 ```
 
-Health reporting distinguishes the SQLite Real Catalog, the embedding runtime,
-and the Qdrant-style ANN index. If the database has no eligible Real Catalog
-Scent Profiles, health returns `empty_catalog` and points back to the audit and
-import workflow. If the index is missing, stale, or unreadable, the recovery path
-is to rebuild it from SQLite:
+If the index is missing, stale, or unreadable, rebuild it from SQLite:
 
 ```bash
 python3 -m noseprint.catalog rebuild-qdrant-index \
@@ -82,12 +85,31 @@ python3 -m noseprint.catalog rebuild-qdrant-index \
   --index var/qdrant-index.json
 ```
 
-The embedding runtime defaults to the practical CPU path. On a local runtime
-that has CUDA support for a GTX 1050 Ti-class GPU, set
-`NOSEPRINT_CUDA_SUPPORTED=1` and leave `NOSEPRINT_EMBEDDING_DEVICE=auto` to let
-health report `runtime_device: "cuda"`. If CUDA is requested with
-`NOSEPRINT_EMBEDDING_DEVICE=cuda` but unavailable, health reports a clear CPU
-fallback instead of failing startup.
+The embedding runtime defaults to CPU. If a local CUDA runtime is supported, set
+`NOSEPRINT_CUDA_SUPPORTED=1` and leave `NOSEPRINT_EMBEDDING_DEVICE=auto`. If
+CUDA is requested but unavailable, health reports a clear CPU fallback.
+
+## Vector Database Primitives Learned
+
+- **Vectors**: NosePrint turns each Scent Profile into a 384-number list in
+  `noseprint/catalog.py`; the exact Scent Match path compares those lists with
+  cosine similarity.
+- **Points**: `rebuild-qdrant-index` writes one point per Real Catalog Fragrance
+  Edition to `var/qdrant-index.json`: an id, a vector, and a small payload.
+- **Payloads**: each point carries `fragrance_edition_id` and `catalog_kind`.
+  Shopper search accepts only payloads that match a Real Catalog row in SQLite.
+- **Top-k search**: `scent-matches --index ... --limit 10` asks for the nearest
+  matches, then hydrates final details from SQLite.
+- **Freshness metadata**: the index stores model, dimension, schema version,
+  point count, and catalog fingerprint so `qdrant-health` can detect stale or
+  unreadable indexes.
+- **Exact baseline**: exact cosine search stays available so ANN results can be
+  checked instead of trusted blindly.
+- **Recall-at-k**: `evaluate-reference-matches` and
+  `benchmark-scale-test-catalog` report how much the ANN path overlaps the exact
+  baseline.
+- **Safe rebuilds**: the index can be deleted or regenerated because SQLite owns
+  the catalog facts.
 
 The catalog workflow has thirteen commands:
 
