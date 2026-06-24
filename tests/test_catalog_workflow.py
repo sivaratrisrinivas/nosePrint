@@ -9,6 +9,22 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CURATED_REAL_CATALOG_SCHEMA = [
+    "fragrance_name",
+    "fragrance_edition_name",
+    "brand",
+    "concentration",
+    "main_accords",
+    "top_notes",
+    "middle_notes",
+    "base_notes",
+    "scent_family",
+    "identity_source_urls",
+    "scent_profile_source_urls",
+    "curator_review_status",
+    "curator_reviewed_on",
+    "curation_notes",
+]
 
 
 class CatalogWorkflowTests(unittest.TestCase):
@@ -2171,6 +2187,262 @@ class CatalogWorkflowTests(unittest.TestCase):
                         "source_row": 2,
                         "original_name": "  Example Scent  ",
                     }
+                ],
+            )
+
+    def test_passing_audit_imports_reviewed_curated_real_catalog_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            source = workspace / "curated.csv"
+            source.write_text(
+                "fragrance_name,fragrance_edition_name,brand,concentration,"
+                "main_accords,top_notes,middle_notes,base_notes,scent_family,"
+                "identity_source_urls,scent_profile_source_urls,"
+                "curator_review_status,curator_reviewed_on,curation_notes\n"
+                "Sample Rose,Sample Rose EDP,Fixture House,EDP,"
+                '"floral, fresh","bergamot, pink pepper",rose,musk,floral,'
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,Manual fixture review\n",
+                encoding="utf-8",
+            )
+            manifest = workspace / "audit.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "dataset": {
+                            "id": "curated-seed-fixture-v1",
+                            "download_url": "file:///tmp/curated.csv",
+                            "publisher": "NosePrint maintainers",
+                            "claimed_license": "manual-review",
+                            "license_evidence": ["https://example.test/source-policy"],
+                            "license_chain_status": "passed",
+                            "provenance_evidence": ["https://example.test/provenance"],
+                            "provenance_status": "passed",
+                            "expected_schema": CURATED_REAL_CATALOG_SCHEMA,
+                            "expected_row_count": 1,
+                            "quality_status": "passed",
+                            "quality_risks": [],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = workspace / "audit-report.json"
+            database = workspace / "catalog.sqlite3"
+
+            audit = self.run_catalog(
+                "audit",
+                "--manifest",
+                str(manifest),
+                "--source",
+                str(source),
+                "--report",
+                str(report),
+            )
+            imported = self.run_catalog(
+                "import",
+                "--audit-report",
+                str(report),
+                "--source",
+                str(source),
+                "--database",
+                str(database),
+            )
+            browsed = self.run_catalog(
+                "browse", "--database", str(database), "--query", "sample rose"
+            )
+            inspected = self.run_catalog("inspect", "--database", str(database))
+            inspected_profile = self.run_catalog(
+                "scent-profile",
+                "--database",
+                str(database),
+                "--edition-id",
+                "1",
+            )
+
+            self.assertEqual(audit.returncode, 0, audit.stderr)
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            self.assertEqual(
+                json.loads(imported.stdout),
+                {
+                    "accepted": 1,
+                    "rejected": 0,
+                    "transformed": 1,
+                    "duplicates": 0,
+                    "quarantined": 0,
+                },
+            )
+            self.assertEqual(
+                json.loads(browsed.stdout),
+                {
+                    "status": "ok",
+                    "query": "sample rose",
+                    "results": [
+                        {
+                            "fragrance_edition_id": 1,
+                            "fragrance": "Sample Rose",
+                            "edition": "Sample Rose EDP",
+                            "concentration": "EDP",
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(
+                json.loads(inspected.stdout),
+                [
+                    {
+                        "brand": "Fixture House",
+                        "fragrance": "Sample Rose",
+                        "edition": "Sample Rose EDP",
+                        "concentration": "EDP",
+                        "notes": ["bergamot", "musk", "pink pepper", "rose"],
+                        "source_dataset": "curated-seed-fixture-v1",
+                        "source_row": 2,
+                        "original_name": "Sample Rose",
+                        "source_urls": {
+                            "identity": ["https://example.test/identity"],
+                            "scent_profile": ["https://example.test/profile"],
+                        },
+                    }
+                ],
+            )
+            self.assertEqual(
+                json.loads(inspected_profile.stdout),
+                {
+                    "status": "ok",
+                    "fragrance_edition_id": 1,
+                    "fragrance": "Sample Rose",
+                    "edition": "Sample Rose EDP",
+                    "concentration": "EDP",
+                    "scent_profile": {
+                        "main_accords": ["floral", "fresh"],
+                        "note_pyramid": {
+                            "top": ["bergamot", "pink pepper"],
+                            "middle": ["rose"],
+                            "base": ["musk"],
+                        },
+                        "scent_family": "floral",
+                    },
+                },
+            )
+
+    def test_curated_import_reports_duplicates_rejections_and_quarantines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            source = workspace / "curated-mixed.csv"
+            source.write_text(
+                "fragrance_name,fragrance_edition_name,brand,concentration,"
+                "main_accords,top_notes,middle_notes,base_notes,scent_family,"
+                "identity_source_urls,scent_profile_source_urls,"
+                "curator_review_status,curator_reviewed_on,curation_notes\n"
+                "Sample Rose,Sample Rose EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,Valid row\n"
+                "Sample Rose,Sample Rose EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,Duplicate row\n"
+                "Nameless,Nameless EDP,,EDP,floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,Missing brand\n"
+                "Draft Rose,Draft Rose EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "draft,2026-06-25,Not reviewed\n"
+                "Unsourced Rose,Unsourced Rose EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,,reviewed,2026-06-25,Missing source\n"
+                "Empty Profile,Empty Profile EDP,Fixture House,EDP,,,,,,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,No scent facts\n"
+                "Malformed,Malformed EDP,Fixture House,EDP,floral,bergamot,"
+                "rose,musk,floral,https://example.test/identity,"
+                "https://example.test/profile,reviewed,2026-06-25,Too many,values\n",
+                encoding="utf-8",
+            )
+            manifest = workspace / "audit.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "dataset": {
+                            "id": "curated-mixed-fixture-v1",
+                            "download_url": "file:///tmp/curated-mixed.csv",
+                            "publisher": "NosePrint maintainers",
+                            "claimed_license": "manual-review",
+                            "license_evidence": ["https://example.test/source-policy"],
+                            "license_chain_status": "passed",
+                            "provenance_evidence": ["https://example.test/provenance"],
+                            "provenance_status": "passed",
+                            "expected_schema": CURATED_REAL_CATALOG_SCHEMA,
+                            "expected_row_count": 7,
+                            "quality_status": "passed",
+                            "quality_risks": ["Fixture contains known invalid rows."],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = workspace / "audit-report.json"
+            database = workspace / "catalog.sqlite3"
+            self.run_catalog(
+                "audit",
+                "--manifest",
+                str(manifest),
+                "--source",
+                str(source),
+                "--report",
+                str(report),
+            )
+
+            imported = self.run_catalog(
+                "import",
+                "--audit-report",
+                str(report),
+                "--source",
+                str(source),
+                "--database",
+                str(database),
+            )
+            quarantined = self.run_catalog(
+                "inspect-quarantine", "--database", str(database)
+            )
+
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            self.assertEqual(
+                json.loads(imported.stdout),
+                {
+                    "accepted": 1,
+                    "rejected": 4,
+                    "transformed": 1,
+                    "duplicates": 1,
+                    "quarantined": 1,
+                },
+            )
+            self.assertEqual(
+                json.loads(quarantined.stdout),
+                [
+                    {"source_row": 4, "disposition": "rejected", "reason": "missing brand"},
+                    {
+                        "source_row": 5,
+                        "disposition": "rejected",
+                        "reason": "curator review status is not reviewed",
+                    },
+                    {
+                        "source_row": 6,
+                        "disposition": "rejected",
+                        "reason": "missing scent_profile_source_urls",
+                    },
+                    {
+                        "source_row": 7,
+                        "disposition": "quarantined",
+                        "reason": "missing Scent Profile facts",
+                    },
+                    {
+                        "source_row": 8,
+                        "disposition": "rejected",
+                        "reason": "malformed columns",
+                    },
                 ],
             )
 

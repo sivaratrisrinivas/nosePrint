@@ -28,6 +28,39 @@ The source SHA-256 must match the audited file. Accepted rows become separate Fr
 
 The command reports `accepted`, `rejected`, `transformed`, `duplicates`, and `quarantined` counts. Re-running the same import does not duplicate catalog records.
 
+## Import a manually curated seed Real Catalog
+
+For shopper-facing quality, prefer a small manually reviewed seed Real Catalog
+over the current low-detail prototype dataset. See
+[`docs/curated-real-catalog.md`](curated-real-catalog.md) for the source policy.
+
+The curated CSV schema is:
+
+```text
+fragrance_name,fragrance_edition_name,brand,concentration,main_accords,top_notes,middle_notes,base_notes,scent_family,identity_source_urls,scent_profile_source_urls,curator_review_status,curator_reviewed_on,curation_notes
+```
+
+Use the same audit and import commands. The manifest's `expected_schema` must
+match the curated columns exactly. Import accepts only rows where:
+
+- identity fields are present: Fragrance name, Fragrance Edition name, and
+  brand;
+- `curator_review_status` is `reviewed`;
+- identity and Scent Profile source URLs are present;
+- at least one Scent Profile fact is known: notes, main accords, or scent
+  family.
+
+Accepted curated rows become Real Catalog Fragrance Editions with rich Scent
+Profiles: main accords, top notes, middle notes, base notes, and scent family.
+Missing fact groups remain `unknown` in shopper-facing commands. Rows with no
+usable Scent Profile facts are quarantined. Rows that are not reviewed, are
+missing source URLs, have missing identity fields, or have malformed columns are
+rejected. Duplicate Fragrance Editions are skipped deterministically.
+
+`inspect` keeps the source trace visible by showing the original curated row's
+identity and Scent Profile source URLs. Do not copy marketing prose or images
+into the curated seed unless their reuse rights are separately verified.
+
 ## Import after the owner accepts an inconclusive risk
 
 For a personal side project, you may decide to use a source even when the audit is inconclusive. Do not change the audit verdict to `passed`. Keep the truth visible and import with an explicit owner-risk note:

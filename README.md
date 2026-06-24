@@ -50,6 +50,9 @@ automatic import by default. For this personal side project, the owner can
 explicitly accept that risk without pretending the audit passed.
 
 Read the full [audit result](docs/audits/perfume-recommendation-dataset-v1.md).
+For a better shopper-facing seed dataset, use the
+[curated Real Catalog strategy](docs/curated-real-catalog.md): manually reviewed
+rows from permitted sources, with source URLs and rich Scent Profile facts.
 
 ## How
 

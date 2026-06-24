@@ -20,6 +20,22 @@ EMBEDDING_DIMENSIONS = 384
 EMBEDDING_MODEL = "noseprint-hash-embedding-384"
 EMBEDDING_MODEL_VERSION = "1"
 SERIALIZATION_PIPELINE_VERSION = "scent-profile-serialization-v1"
+CURATED_REAL_CATALOG_SCHEMA = [
+    "fragrance_name",
+    "fragrance_edition_name",
+    "brand",
+    "concentration",
+    "main_accords",
+    "top_notes",
+    "middle_notes",
+    "base_notes",
+    "scent_family",
+    "identity_source_urls",
+    "scent_profile_source_urls",
+    "curator_review_status",
+    "curator_reviewed_on",
+    "curation_notes",
+]
 
 
 def _sha256(path: Path) -> str:
@@ -164,6 +180,17 @@ def _import_catalog(args: argparse.Namespace) -> int:
                     )
                     counts["rejected"] += 1
                     continue
+                if dataset.get("expected_schema") == CURATED_REAL_CATALOG_SCHEMA:
+                    _import_curated_catalog_row(
+                        connection,
+                        dataset_id=dataset["id"],
+                        source_row=source_row,
+                        row=row,
+                        original_values=original_values,
+                        seen_editions=seen_editions,
+                        counts=counts,
+                    )
+                    continue
                 original_name = row.get("Name") or ""
                 fragrance_name = original_name.strip()
                 brand = (row.get("Brand") or "").strip()
@@ -258,6 +285,177 @@ def _import_catalog(args: argparse.Namespace) -> int:
         connection.close()
     print(json.dumps(counts, sort_keys=True))
     return 0
+
+
+def _import_curated_catalog_row(
+    connection: sqlite3.Connection,
+    *,
+    dataset_id: str,
+    source_row: int,
+    row: dict[str, str],
+    original_values: dict[str, Any],
+    seen_editions: set[tuple[str, str]],
+    counts: dict[str, int],
+) -> None:
+    fragrance_name = row.get("fragrance_name", "").strip()
+    edition_name = row.get("fragrance_edition_name", "").strip()
+    brand = row.get("brand", "").strip()
+    concentration = row.get("concentration", "").strip() or None
+    if not fragrance_name:
+        _record_disposition(
+            connection,
+            dataset_id=dataset_id,
+            source_row=source_row,
+            disposition="rejected",
+            reason="missing fragrance_name",
+            original_values=original_values,
+        )
+        counts["rejected"] += 1
+        return
+    if not edition_name:
+        _record_disposition(
+            connection,
+            dataset_id=dataset_id,
+            source_row=source_row,
+            disposition="rejected",
+            reason="missing fragrance_edition_name",
+            original_values=original_values,
+        )
+        counts["rejected"] += 1
+        return
+    if not brand:
+        _record_disposition(
+            connection,
+            dataset_id=dataset_id,
+            source_row=source_row,
+            disposition="rejected",
+            reason="missing brand",
+            original_values=original_values,
+        )
+        counts["rejected"] += 1
+        return
+
+    if row.get("curator_review_status", "").strip().casefold() != "reviewed":
+        _record_disposition(
+            connection,
+            dataset_id=dataset_id,
+            source_row=source_row,
+            disposition="rejected",
+            reason="curator review status is not reviewed",
+            original_values=original_values,
+        )
+        counts["rejected"] += 1
+        return
+    if not row.get("identity_source_urls", "").strip():
+        _record_disposition(
+            connection,
+            dataset_id=dataset_id,
+            source_row=source_row,
+            disposition="rejected",
+            reason="missing identity_source_urls",
+            original_values=original_values,
+        )
+        counts["rejected"] += 1
+        return
+    if not row.get("scent_profile_source_urls", "").strip():
+        _record_disposition(
+            connection,
+            dataset_id=dataset_id,
+            source_row=source_row,
+            disposition="rejected",
+            reason="missing scent_profile_source_urls",
+            original_values=original_values,
+        )
+        counts["rejected"] += 1
+        return
+
+    main_accords = _normalized_list(row.get("main_accords", ""))
+    top_notes = _normalized_list(row.get("top_notes", ""))
+    middle_notes = _normalized_list(row.get("middle_notes", ""))
+    base_notes = _normalized_list(row.get("base_notes", ""))
+    scent_family = row.get("scent_family", "").strip().casefold() or None
+    notes = sorted({*top_notes, *middle_notes, *base_notes})
+    if not any([main_accords, notes, scent_family]):
+        _record_disposition(
+            connection,
+            dataset_id=dataset_id,
+            source_row=source_row,
+            disposition="quarantined",
+            reason="missing Scent Profile facts",
+            original_values=original_values,
+        )
+        counts["quarantined"] += 1
+        return
+
+    edition_key = (brand.casefold(), edition_name.casefold())
+    if edition_key in seen_editions:
+        _record_disposition(
+            connection,
+            dataset_id=dataset_id,
+            source_row=source_row,
+            disposition="duplicate",
+            reason="duplicate Fragrance Edition",
+            original_values=original_values,
+        )
+        counts["duplicates"] += 1
+        return
+
+    fragrance_id = _get_or_create_fragrance(
+        connection, fragrance_name=fragrance_name, brand=brand
+    )
+    edition_id = _get_or_create_edition(
+        connection,
+        fragrance_id=fragrance_id,
+        edition_name=edition_name,
+        concentration=concentration,
+    )
+    connection.execute(
+        """
+        INSERT OR REPLACE INTO scent_profiles
+            (fragrance_edition_id, notes_json, main_accords_json,
+             top_notes_json, middle_notes_json, base_notes_json, scent_family)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            edition_id,
+            json.dumps(notes),
+            _json_or_null(main_accords),
+            _json_or_null(top_notes),
+            _json_or_null(middle_notes),
+            _json_or_null(base_notes),
+            scent_family,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO source_records
+            (dataset_id, source_row, fragrance_edition_id, original_values_json)
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            dataset_id,
+            source_row,
+            edition_id,
+            json.dumps(original_values, sort_keys=True),
+        ),
+    )
+    counts["accepted"] += 1
+    counts["transformed"] += 1
+    seen_editions.add(edition_key)
+
+
+def _normalized_list(value: str) -> list[str]:
+    return sorted(
+        {
+            item.strip().casefold()
+            for item in value.split(",")
+            if item.strip()
+        }
+    )
+
+
+def _json_or_null(values: list[str]) -> str | None:
+    return json.dumps(values) if values else None
 
 
 def _report_passes(report: dict[str, Any]) -> bool:
@@ -436,7 +634,11 @@ def _get_or_create_fragrance(
 
 
 def _get_or_create_edition(
-    connection: sqlite3.Connection, *, fragrance_id: int, edition_name: str
+    connection: sqlite3.Connection,
+    *,
+    fragrance_id: int,
+    edition_name: str,
+    concentration: str | None = None,
 ) -> int:
     connection.execute(
         """
@@ -446,6 +648,15 @@ def _get_or_create_edition(
         """,
         (fragrance_id, edition_name),
     )
+    if concentration is not None:
+        connection.execute(
+            """
+            UPDATE fragrance_editions
+            SET concentration = ?
+            WHERE fragrance_id = ? AND name = ? AND concentration IS NULL
+            """,
+            (concentration, fragrance_id, edition_name),
+        )
     row = connection.execute(
         "SELECT id FROM fragrance_editions WHERE fragrance_id = ? AND name = ?",
         (fragrance_id, edition_name),
@@ -474,20 +685,30 @@ def _inspect(args: argparse.Namespace) -> int:
     catalog = []
     for row in rows:
         original = json.loads(row["original_values_json"])
-        catalog.append(
-            {
-                "brand": row["brand"],
-                "fragrance": row["fragrance"],
-                "edition": row["edition"],
-                "concentration": row["concentration"],
-                "notes": json.loads(row["notes_json"]),
-                "source_dataset": row["dataset_id"],
-                "source_row": row["source_row"],
-                "original_name": original["Name"],
+        record = {
+            "brand": row["brand"],
+            "fragrance": row["fragrance"],
+            "edition": row["edition"],
+            "concentration": row["concentration"],
+            "notes": json.loads(row["notes_json"]),
+            "source_dataset": row["dataset_id"],
+            "source_row": row["source_row"],
+            "original_name": original.get("Name", original.get("fragrance_name")),
+        }
+        if "identity_source_urls" in original or "scent_profile_source_urls" in original:
+            record["source_urls"] = {
+                "identity": _source_urls(original.get("identity_source_urls", "")),
+                "scent_profile": _source_urls(
+                    original.get("scent_profile_source_urls", "")
+                ),
             }
-        )
+        catalog.append(record)
     print(json.dumps(catalog, indent=2))
     return 0
+
+
+def _source_urls(value: str) -> list[str]:
+    return [url.strip() for url in value.split(",") if url.strip()]
 
 
 def _inspect_quarantine(args: argparse.Namespace) -> int:
