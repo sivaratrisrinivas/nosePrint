@@ -17,8 +17,9 @@ NosePrint separates three ideas that are easy to blur:
 
 The current application is a Python command-line workflow backed by SQLite. It
 can audit a candidate data source, import accepted Real Catalog records, browse
-Fragrance Editions by Fragrance name, inspect a selected Scent Profile, and find
-exact-cosine Scent Matches for a selected Fragrance Edition.
+Fragrance Editions by Fragrance name, inspect a selected Scent Profile, find
+exact-cosine Scent Matches for a selected Fragrance Edition, and serve those
+matches through a rebuildable Qdrant-style ANN index.
 
 SQLite is the catalog source of truth. Future search indexes, including vector
 search, should be rebuildable helpers rather than competing master copies.
@@ -56,7 +57,7 @@ Run the test suite with:
 python3 -m unittest discover -v
 ```
 
-The catalog workflow has seven commands:
+The catalog workflow has nine commands:
 
 1. `audit` checks a candidate Real Catalog source and writes a report.
 2. `import` accepts only the exact file that received a passing report, unless
@@ -67,6 +68,10 @@ The catalog workflow has seven commands:
 6. `scent-profile` shows the selected Fragrance Edition's Scent Profile.
 7. `scent-matches` returns ranked exact-cosine Scent Matches from the Real
    Catalog with calibrated labels and factual Profile Comparisons.
+8. `qdrant-health` reports SQLite catalog, embedding runtime, and ANN index
+   freshness state.
+9. `rebuild-qdrant-index` rebuilds the ANN index from SQLite Scent Profiles
+   without turning the index into the catalog source of truth.
 
 See [how to run the catalog workflow](docs/catalog-import.md) for complete
 commands.
@@ -109,6 +114,36 @@ Each result includes a calibrated strength label, a model-specific exact-cosine
 score, and a factual Profile Comparison. Scale-Test Catalog rows are excluded
 from this shopper workflow.
 
+Build and check the ANN index before using the Qdrant retrieval path:
+
+```bash
+python3 -m noseprint.catalog qdrant-health \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json
+
+python3 -m noseprint.catalog rebuild-qdrant-index \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json
+```
+
+Then run Scent Matches through the fresh index:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json \
+  --edition-id 1 \
+  --limit 10
+```
+
+The ANN path checks model, model version, serialization pipeline, dimensions,
+catalog fingerprint, and point count before serving results. Missing or stale
+indexes return a rebuild message instead of serving possibly incorrect matches.
+ANN hits contain only stable identifiers and retrieval payloads; final result
+details and Profile Comparisons are hydrated from SQLite. The response also
+keeps exact cosine as the baseline and reports recall-at-k plus separate
+embedding, retrieval, and hydration latency fields.
+
 ## Current Guarantees
 
 - Inconclusive catalog audits are blocked unless the owner explicitly accepts
@@ -131,6 +166,8 @@ from this shopper workflow.
   stay `unknown`.
 - SQLite records versioned 384-number Scent Profile embeddings so future search
   indexes can be rebuilt without becoming the catalog source of truth.
+- The Qdrant-style ANN index is derived from SQLite, freshness-checked before
+  use, and safe to rebuild when missing, stale, or incompatible.
 
 ## Learning Notes
 
@@ -141,7 +178,7 @@ owner. Product code should remain usable without reading those learning files.
 
 ## Direction
 
-The next project step is using the truthful SQLite Real Catalog and exact-cosine
-baseline for later vector-search experiments. The important rule remains the
-same: search can get faster and smarter, but catalog facts must stay traceable
-and honest.
+The next project step is layering shopper filters and evaluation workflows on
+top of the truthful SQLite Real Catalog, exact-cosine baseline, and rebuildable
+ANN index. The important rule remains the same: search can get faster and more
+useful, but catalog facts must stay traceable and honest.

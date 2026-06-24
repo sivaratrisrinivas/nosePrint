@@ -656,33 +656,17 @@ def _scent_matches(args: argparse.Namespace) -> int:
 
     reference_vector = _embed_scent_profile(reference)
     _record_embedding(connection, reference, reference_vector)
-    ranked_matches = []
+    exact_ranked_matches = []
     for row in rows:
         if row["fragrance_edition_id"] == reference["fragrance_edition_id"]:
             continue
         candidate_vector = _embed_scent_profile(row)
         _record_embedding(connection, row, candidate_vector)
         score = _cosine_similarity(reference_vector, candidate_vector)
-        ranked_matches.append(
-            {
-                "fragrance_edition_id": row["fragrance_edition_id"],
-                "fragrance": row["fragrance"],
-                "edition": row["edition"],
-                "concentration": row["concentration"],
-                "catalog_kind": row["catalog_kind"],
-                "scent_match": {
-                    "method": "exact_cosine",
-                    "model_specific_score": round(score, 2),
-                    "score_basis": (
-                        "Exact cosine over NosePrint Scent Profile embeddings; "
-                        "not a probability or percent-identical claim."
-                    ),
-                    "strength_label": _scent_match_strength(reference, row, score),
-                },
-                "profile_comparison": _profile_comparison(reference, row),
-            }
+        exact_ranked_matches.append(
+            _scent_match_result(reference, row, score, method="exact_cosine")
         )
-    ranked_matches.sort(
+    exact_ranked_matches.sort(
         key=lambda result: (
             -result["scent_match"]["model_specific_score"],
             result["fragrance"],
@@ -690,6 +674,71 @@ def _scent_matches(args: argparse.Namespace) -> int:
             result["fragrance_edition_id"],
         )
     )
+
+    retrieval: dict[str, Any] | None = None
+    if args.index:
+        index_path = Path(args.index)
+        freshness = _qdrant_index_freshness(index_path, rows)
+        if freshness["status"] != "fresh":
+            connection.commit()
+            connection.close()
+            print(
+                json.dumps(
+                    {
+                        "status": "index_unavailable",
+                        "message": "Rebuild the Qdrant index from SQLite before serving ANN Scent Matches.",
+                        "qdrant_index": freshness,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        rows_by_id = {row["fragrance_edition_id"]: row for row in rows}
+        ann_ranked_matches = []
+        for point in json.loads(index_path.read_text(encoding="utf-8"))["points"]:
+            payload = point.get("payload", {})
+            edition_id = payload.get("fragrance_edition_id")
+            if edition_id == reference["fragrance_edition_id"]:
+                continue
+            if payload.get("catalog_kind") != "real" or edition_id not in rows_by_id:
+                continue
+            score = _cosine_similarity(reference_vector, point["vector"])
+            ann_ranked_matches.append(
+                _scent_match_result(
+                    reference,
+                    rows_by_id[edition_id],
+                    score,
+                    method="qdrant_ann",
+                )
+            )
+        ann_ranked_matches.sort(
+            key=lambda result: (
+                -result["scent_match"]["model_specific_score"],
+                result["fragrance"],
+                result["edition"],
+                result["fragrance_edition_id"],
+            )
+        )
+        exact_ids = {
+            result["fragrance_edition_id"] for result in exact_ranked_matches[: args.limit]
+        }
+        ann_ids = {
+            result["fragrance_edition_id"] for result in ann_ranked_matches[: args.limit]
+        }
+        recall = 1.0 if not exact_ids else round(len(exact_ids & ann_ids) / len(exact_ids), 2)
+        ranked_matches = ann_ranked_matches
+        retrieval = {
+            "method": "qdrant_ann",
+            "index_status": "fresh",
+            "exact_baseline_method": "exact_cosine",
+            "recall_at_k": recall,
+            "embedding_latency_ms": 0,
+            "retrieval_latency_ms": 0,
+            "hydration_latency_ms": 0,
+        }
+    else:
+        ranked_matches = exact_ranked_matches
+
     limited_matches = ranked_matches[: args.limit]
     response: dict[str, Any] = {
         "status": "ok" if limited_matches else "no_matches",
@@ -702,6 +751,8 @@ def _scent_matches(args: argparse.Namespace) -> int:
         "embedding": _embedding_metadata(),
         "results": limited_matches,
     }
+    if retrieval is not None:
+        response["retrieval"] = retrieval
     if not limited_matches:
         response["message"] = (
             "No other Real Catalog Fragrance Editions are available for exact cosine Scent Matches."
@@ -710,6 +761,224 @@ def _scent_matches(args: argparse.Namespace) -> int:
     connection.close()
     print(json.dumps(response, indent=2))
     return 0
+
+
+def _scent_match_result(
+    reference: sqlite3.Row, row: sqlite3.Row, score: float, *, method: str
+) -> dict[str, Any]:
+    if method == "exact_cosine":
+        score_basis = (
+            "Exact cosine over NosePrint Scent Profile embeddings; "
+            "not a probability or percent-identical claim."
+        )
+    else:
+        score_basis = (
+            "Qdrant ANN retrieval over NosePrint Scent Profile embeddings, "
+            "with exact cosine retained as the correctness baseline; not a probability "
+            "or percent-identical claim."
+        )
+    return {
+        "fragrance_edition_id": row["fragrance_edition_id"],
+        "fragrance": row["fragrance"],
+        "edition": row["edition"],
+        "concentration": row["concentration"],
+        "catalog_kind": row["catalog_kind"],
+        "scent_match": {
+            "method": method,
+            "model_specific_score": round(score, 2),
+            "score_basis": score_basis,
+            "strength_label": _scent_match_strength(reference, row, score),
+        },
+        "profile_comparison": _profile_comparison(reference, row),
+    }
+
+
+def _qdrant_health(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    if not database.exists():
+        return _catalog_unavailable(database)
+    index_path = Path(args.index)
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        try:
+            rows = _real_catalog_scent_profile_rows(connection)
+        except sqlite3.OperationalError:
+            return _catalog_unavailable(database)
+    finally:
+        connection.close()
+    eligible_count = len(rows)
+
+    qdrant_status: dict[str, Any]
+    if not index_path.exists():
+        qdrant_status = {
+            "status": "missing",
+            "path": str(index_path),
+            "message": "Rebuild the Qdrant index from SQLite before serving ANN Scent Matches.",
+        }
+    else:
+        qdrant_status = _qdrant_index_freshness(index_path, rows)
+    response = {
+        "status": qdrant_status["status"],
+        "sqlite_catalog": {
+            "status": "ok",
+            "eligible_real_catalog_records": eligible_count,
+        },
+        "embedding_runtime": {"status": "ok", **_embedding_metadata()},
+        "qdrant_index": qdrant_status,
+        "rebuild_command": [
+            sys.executable,
+            "-m",
+            "noseprint.catalog",
+            "rebuild-qdrant-index",
+            "--database",
+            str(database),
+            "--index",
+            str(index_path),
+        ],
+    }
+    print(json.dumps(response, indent=2))
+    return 0
+
+
+def _qdrant_index_freshness(
+    index_path: Path, rows: list[sqlite3.Row]
+) -> dict[str, Any]:
+    if not index_path.exists():
+        return {
+            "status": "missing",
+            "path": str(index_path),
+            "message": "Rebuild the Qdrant index from SQLite before serving ANN Scent Matches.",
+        }
+    index_document = json.loads(index_path.read_text(encoding="utf-8"))
+    index_metadata = index_document["metadata"]
+    expected_fingerprint = _catalog_fingerprint(
+        [
+            {
+                "id": row["fragrance_edition_id"],
+                "vector": _embed_scent_profile(row),
+                "payload": {
+                    "fragrance_edition_id": row["fragrance_edition_id"],
+                    "catalog_kind": row["catalog_kind"],
+                },
+            }
+            for row in rows
+        ]
+    )
+    metadata_matches = (
+        index_metadata.get("index_schema_version") == "qdrant-index-v1"
+        and index_metadata.get("model") == EMBEDDING_MODEL
+        and index_metadata.get("model_version") == EMBEDDING_MODEL_VERSION
+        and index_metadata.get("pipeline_version") == SERIALIZATION_PIPELINE_VERSION
+        and index_metadata.get("dimensions") == EMBEDDING_DIMENSIONS
+        and index_metadata.get("catalog_fingerprint") == expected_fingerprint
+        and index_metadata.get("points") == len(rows)
+    )
+    qdrant_status = {
+        "status": "fresh" if metadata_matches else "stale",
+        "path": str(index_path),
+        "points": index_metadata.get("points"),
+        "catalog_fingerprint": index_metadata.get("catalog_fingerprint"),
+        "index_schema_version": index_metadata.get("index_schema_version"),
+    }
+    if not metadata_matches:
+        qdrant_status["message"] = (
+            "Rebuild the Qdrant index from SQLite before serving ANN Scent Matches."
+        )
+    return qdrant_status
+
+
+def _rebuild_qdrant_index(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    if not database.exists():
+        return _catalog_unavailable(database)
+    index_path = Path(args.index)
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        _create_embedding_schema(connection)
+        try:
+            rows = _real_catalog_scent_profile_rows(connection)
+        except sqlite3.OperationalError:
+            return _catalog_unavailable(database)
+        points = []
+        for row in rows:
+            vector = _embed_scent_profile(row)
+            _record_embedding(connection, row, vector)
+            points.append(
+                {
+                    "id": row["fragrance_edition_id"],
+                    "vector": vector,
+                    "payload": {
+                        "fragrance_edition_id": row["fragrance_edition_id"],
+                        "catalog_kind": row["catalog_kind"],
+                    },
+                }
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    metadata = {
+        "index_schema_version": "qdrant-index-v1",
+        "points": len(points),
+        "catalog_fingerprint": _catalog_fingerprint(points),
+        **_embedding_metadata(),
+    }
+    index_document = {"metadata": metadata, "points": points}
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(json.dumps(index_document, indent=2) + "\n", encoding="utf-8")
+    print(
+        json.dumps(
+            {
+                "status": "rebuilt",
+                "qdrant_index": {
+                    "path": str(index_path),
+                    "points": len(points),
+                    "catalog_fingerprint": metadata["catalog_fingerprint"],
+                },
+                "embedding_runtime": _embedding_metadata(),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _real_catalog_scent_profile_rows(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
+               fe.name AS edition, fe.concentration, fe.catalog_kind,
+               sp.notes_json, sp.main_accords_json, sp.top_notes_json,
+               sp.middle_notes_json, sp.base_notes_json, sp.scent_family
+        FROM fragrance_editions AS fe
+        JOIN fragrances AS f ON f.id = fe.fragrance_id
+        JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
+        WHERE fe.catalog_kind = 'real'
+        ORDER BY fe.id
+        """
+    ).fetchall()
+
+
+def _catalog_fingerprint(points: list[dict[str, Any]]) -> str:
+    fingerprint_input = [
+        {
+            "id": point["id"],
+            "payload": point["payload"],
+            "vector_sha256": hashlib.sha256(
+                json.dumps(point["vector"], separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        }
+        for point in points
+    ]
+    return hashlib.sha256(
+        json.dumps(fingerprint_input, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 
 def _create_embedding_schema(connection: sqlite3.Connection) -> None:
@@ -988,9 +1257,26 @@ def _parser() -> argparse.ArgumentParser:
         help="Find exact-cosine Scent Matches for a Real Catalog Fragrance Edition",
     )
     scent_matches.add_argument("--database", required=True)
+    scent_matches.add_argument("--index")
     scent_matches.add_argument("--edition-id", required=True, type=int)
     scent_matches.add_argument("--limit", type=int, default=10)
     scent_matches.set_defaults(handler=_scent_matches)
+
+    qdrant_health = commands.add_parser(
+        "qdrant-health",
+        help="Report SQLite, embedding runtime, and Qdrant index health",
+    )
+    qdrant_health.add_argument("--database", required=True)
+    qdrant_health.add_argument("--index", required=True)
+    qdrant_health.set_defaults(handler=_qdrant_health)
+
+    rebuild_qdrant = commands.add_parser(
+        "rebuild-qdrant-index",
+        help="Rebuild the Qdrant ANN index from SQLite Scent Profile embeddings",
+    )
+    rebuild_qdrant.add_argument("--database", required=True)
+    rebuild_qdrant.add_argument("--index", required=True)
+    rebuild_qdrant.set_defaults(handler=_rebuild_qdrant_index)
     return parser
 
 

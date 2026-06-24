@@ -251,6 +251,293 @@ class CatalogWorkflowTests(unittest.TestCase):
                 self.assertEqual(row["dimensions"], 384)
                 self.assertEqual(len(json.loads(row["vector_json"])), 384)
 
+    def test_qdrant_index_health_reports_missing_rebuildable_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.create_browse_fixture(database)
+
+            health = self.run_catalog(
+                "qdrant-health",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            self.assertEqual(health.returncode, 0, health.stderr)
+            self.assertEqual(
+                json.loads(health.stdout),
+                {
+                    "status": "missing",
+                    "sqlite_catalog": {
+                        "status": "ok",
+                        "eligible_real_catalog_records": 3,
+                    },
+                    "embedding_runtime": {
+                        "status": "ok",
+                        "model": "noseprint-hash-embedding-384",
+                        "model_version": "1",
+                        "pipeline_version": "scent-profile-serialization-v1",
+                        "dimensions": 384,
+                        "runtime_device": "cpu",
+                    },
+                    "qdrant_index": {
+                        "status": "missing",
+                        "path": str(index),
+                        "message": "Rebuild the Qdrant index from SQLite before serving ANN Scent Matches.",
+                    },
+                    "rebuild_command": [
+                        sys.executable,
+                        "-m",
+                        "noseprint.catalog",
+                        "rebuild-qdrant-index",
+                        "--database",
+                        str(database),
+                        "--index",
+                        str(index),
+                    ],
+                },
+            )
+
+    def test_rebuild_qdrant_index_writes_real_catalog_points_from_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.create_browse_fixture(database)
+
+            rebuilt = self.run_catalog(
+                "rebuild-qdrant-index",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            self.assertEqual(rebuilt.returncode, 0, rebuilt.stderr)
+            self.assertEqual(
+                json.loads(rebuilt.stdout),
+                {
+                    "status": "rebuilt",
+                    "qdrant_index": {
+                        "path": str(index),
+                        "points": 3,
+                        "catalog_fingerprint": "f2c93570c048980cc0174477610a7550284cb8c1dab3f0b723d4acfbb76d5d8a",
+                    },
+                    "embedding_runtime": {
+                        "model": "noseprint-hash-embedding-384",
+                        "model_version": "1",
+                        "pipeline_version": "scent-profile-serialization-v1",
+                        "dimensions": 384,
+                        "runtime_device": "cpu",
+                    },
+                },
+            )
+            index_document = json.loads(index.read_text(encoding="utf-8"))
+            self.assertEqual(index_document["metadata"]["points"], 3)
+            self.assertEqual(
+                [point["payload"] for point in index_document["points"]],
+                [
+                    {"fragrance_edition_id": 1, "catalog_kind": "real"},
+                    {"fragrance_edition_id": 2, "catalog_kind": "real"},
+                    {"fragrance_edition_id": 4, "catalog_kind": "real"},
+                ],
+            )
+            self.assertEqual(len(index_document["points"][0]["vector"]), 384)
+            self.assertNotIn("Sample Rose Load Test", index.read_text(encoding="utf-8"))
+
+    def test_qdrant_index_health_reports_fresh_index_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.create_browse_fixture(database)
+            self.run_catalog(
+                "rebuild-qdrant-index",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            health = self.run_catalog(
+                "qdrant-health",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            self.assertEqual(health.returncode, 0, health.stderr)
+            self.assertEqual(
+                json.loads(health.stdout)["qdrant_index"],
+                {
+                    "status": "fresh",
+                    "path": str(index),
+                    "points": 3,
+                    "catalog_fingerprint": "f2c93570c048980cc0174477610a7550284cb8c1dab3f0b723d4acfbb76d5d8a",
+                    "index_schema_version": "qdrant-index-v1",
+                },
+            )
+
+    def test_qdrant_index_health_reports_stale_catalog_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.create_browse_fixture(database)
+            self.run_catalog(
+                "rebuild-qdrant-index",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    """
+                    UPDATE scent_profiles
+                    SET middle_notes_json = '["rose", "jasmine"]'
+                    WHERE fragrance_edition_id = 1
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            health = self.run_catalog(
+                "qdrant-health",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            self.assertEqual(health.returncode, 0, health.stderr)
+            response = json.loads(health.stdout)
+            self.assertEqual(response["status"], "stale")
+            self.assertEqual(response["qdrant_index"]["status"], "stale")
+            self.assertIn("Rebuild", response["qdrant_index"]["message"])
+
+    def test_scent_matches_use_fresh_qdrant_index_and_hydrate_from_sqlite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.create_browse_fixture(database)
+            self.run_catalog(
+                "rebuild-qdrant-index",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                "--edition-id",
+                "2",
+                "--limit",
+                "3",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            response = json.loads(matched.stdout)
+            self.assertEqual(response["status"], "ok")
+            self.assertEqual(
+                response["retrieval"],
+                {
+                    "method": "qdrant_ann",
+                    "index_status": "fresh",
+                    "exact_baseline_method": "exact_cosine",
+                    "recall_at_k": 1.0,
+                    "embedding_latency_ms": 0,
+                    "retrieval_latency_ms": 0,
+                    "hydration_latency_ms": 0,
+                },
+            )
+            self.assertEqual(
+                [result["fragrance_edition_id"] for result in response["results"]],
+                [1, 4],
+            )
+            self.assertEqual(
+                {result["scent_match"]["method"] for result in response["results"]},
+                {"qdrant_ann"},
+            )
+            self.assertEqual(response["results"][0]["fragrance"], "Sample Rose")
+            self.assertNotIn("Sample Rose Load Test", matched.stdout)
+
+    def test_scent_matches_refuse_stale_qdrant_index_until_rebuilt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.create_browse_fixture(database)
+            self.run_catalog(
+                "rebuild-qdrant-index",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    """
+                    UPDATE scent_profiles
+                    SET top_notes_json = '["pink pepper", "lemon"]'
+                    WHERE fragrance_edition_id = 2
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                "--edition-id",
+                "2",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            self.assertEqual(json.loads(matched.stdout)["status"], "index_unavailable")
+            self.assertIn("Rebuild", json.loads(matched.stdout)["message"])
+            self.assertNotIn("results", json.loads(matched.stdout))
+
+    def test_scent_matches_explain_missing_qdrant_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "missing-qdrant-index.json"
+            self.create_browse_fixture(database)
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                "--edition-id",
+                "2",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            response = json.loads(matched.stdout)
+            self.assertEqual(response["status"], "index_unavailable")
+            self.assertEqual(response["qdrant_index"]["status"], "missing")
+            self.assertIn("Rebuild", response["message"])
+
     def test_scent_match_labels_strong_and_surprising_profile_comparisons(
         self,
     ) -> None:

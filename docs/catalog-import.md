@@ -128,3 +128,73 @@ claims about why the model ranked a result.
 The generated 384-number embeddings are recorded in SQLite with their model and
 pipeline versions. Later search indexes can be rebuilt from these catalog-owned
 facts instead of becoming a second source of truth.
+
+## Check and rebuild the Qdrant ANN index
+
+The ANN index is a rebuildable helper derived from SQLite. It stores stable
+Fragrance Edition identifiers, 384-number vectors, Real Catalog eligibility, and
+metadata needed to detect stale or incompatible search data. It does not store
+the shopper-facing Fragrance Edition details.
+
+Check health before serving ANN Scent Matches:
+
+```bash
+python3 -m noseprint.catalog qdrant-health \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json
+```
+
+The health response distinguishes:
+
+- `sqlite_catalog`: whether SQLite has eligible Real Catalog Scent Profiles
+- `embedding_runtime`: the configured model, model version, pipeline version,
+  dimensions, and CPU runtime fallback
+- `qdrant_index`: whether the index is `missing`, `fresh`, or `stale`
+
+If the index is missing or stale, rebuild it from SQLite:
+
+```bash
+python3 -m noseprint.catalog rebuild-qdrant-index \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json
+```
+
+Rebuilding records one point for each eligible Real Catalog Fragrance Edition
+with only this retrieval payload:
+
+- `fragrance_edition_id`
+- `catalog_kind`
+
+Scale-Test Catalog records are not written to the normal shopping index. If
+SQLite catalog facts, the embedding model, the model version, the serialization
+pipeline, dimensions, or the index schema change, health reports the index as
+stale and tells the user to rebuild.
+
+## Find ANN Scent Matches
+
+Pass a fresh index to the same public Scent Match workflow:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json \
+  --edition-id 1 \
+  --limit 10
+```
+
+When `--index` is present, NosePrint checks index freshness before serving
+matches. Fresh index hits are hydrated from SQLite before display, so SQLite
+remains the source of truth for Fragrance, Fragrance Edition, Scent Profile, and
+Profile Comparison details.
+
+The response includes `retrieval` metadata:
+
+- `method`: `qdrant_ann`
+- `exact_baseline_method`: `exact_cosine`
+- `recall_at_k`: how many ANN results overlap the exact baseline at the same
+  limit
+- `embedding_latency_ms`, `retrieval_latency_ms`, and `hydration_latency_ms`
+
+If the index is missing, stale, or incompatible, the command returns
+`status: "index_unavailable"` and a rebuild message instead of returning
+possibly stale matches.
