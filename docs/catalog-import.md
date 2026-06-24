@@ -163,6 +163,39 @@ Different bottle sizes show price per millilitre for inspection but are not
 treated as strict cheaper claims. Missing prices are displayed as `unknown` and
 are not guessed.
 
+## Inspect and filter by Wear Profiles
+
+Wear Profile facts are curated SQLite facts attached to Fragrance Editions and
+kept separate from Scent Profiles. They describe reported longevity and
+projection after application. They do not become embedding input and do not
+change Scent Match scores, labels, ranking, or Profile Comparisons.
+
+Show Wear Profile facts without filtering Scent Matches:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1 \
+  --limit 10 \
+  --show-wear-profiles
+```
+
+Return only alternatives with known matching Wear Profile facts:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1 \
+  --limit 10 \
+  --wear-longevity moderate \
+  --wear-projection soft
+```
+
+Known facts appear as plain catalog values. Missing longevity or projection is
+shown as `unknown`, and unknown values do not match filters. The response also
+states that Wear Profile facts are reported catalog observations, not a
+guarantee for every person's skin.
+
 ## Check and rebuild the Qdrant ANN index
 
 The ANN index is a rebuildable helper derived from SQLite. It stores stable

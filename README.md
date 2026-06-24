@@ -19,7 +19,9 @@ The current application is a Python command-line workflow backed by SQLite. It
 can audit a candidate data source, import accepted Real Catalog records, browse
 Fragrance Editions by Fragrance name, inspect a selected Scent Profile, find
 exact-cosine Scent Matches for a selected Fragrance Edition, and serve those
-matches through a rebuildable Qdrant-style ANN index.
+matches through a rebuildable Qdrant-style ANN index. Scent Matches can also be
+annotated and filtered by Comparable Prices and Wear Profile facts without
+changing scent similarity.
 
 SQLite is the catalog source of truth. Future search indexes, including vector
 search, should be rebuildable helpers rather than competing master copies.
@@ -68,7 +70,7 @@ The catalog workflow has nine commands:
 6. `scent-profile` shows the selected Fragrance Edition's Scent Profile.
 7. `scent-matches` returns ranked exact-cosine Scent Matches from the Real
    Catalog with calibrated labels, factual Profile Comparisons, and optional
-   Comparable Price filtering.
+   Comparable Price and Wear Profile filtering.
 8. `qdrant-health` reports SQLite catalog, embedding runtime, and ANN index
    freshness state.
 9. `rebuild-qdrant-index` rebuilds the ANN index from SQLite Scent Profiles
@@ -131,6 +133,22 @@ Prices below the selected Fragrance Edition. Price per millilitre is shown as a
 second check. Unknown prices remain `unknown`, and different bottle sizes do not
 support a strict cheaper claim.
 
+If curated Wear Profile facts exist in SQLite, inspect reported longevity and
+projection alongside Scent Matches:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1 \
+  --limit 10 \
+  --show-wear-profiles
+```
+
+Use `--wear-longevity` and `--wear-projection` to narrow alternatives by known
+Wear Profile facts. Missing Wear Profile facts remain `unknown` and do not match
+filters. Wear Profile output includes a notice that cataloged longevity and
+projection are not guarantees for every person's skin.
+
 Build and check the ANN index before using the Qdrant retrieval path:
 
 ```bash
@@ -178,6 +196,9 @@ embedding, retrieval, and hydration latency fields.
 - Comparable Prices are dated United States USD snapshots stored in SQLite.
   They can filter or annotate Scent Matches, but they do not change Scent Match
   scores, labels, or Profile Comparisons.
+- Wear Profile longevity and projection facts are stored in SQLite separately
+  from Scent Profiles. They can filter or annotate Scent Matches, but they do
+  not change Scent Match scores, labels, embeddings, or Profile Comparisons.
 - Scent Match scores are model-specific exact-cosine scores, not probabilities,
   percent-identical claims, or promises about how someone will perceive a
   Fragrance Edition on skin.

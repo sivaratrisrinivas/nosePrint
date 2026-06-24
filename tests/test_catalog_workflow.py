@@ -410,6 +410,120 @@ class CatalogWorkflowTests(unittest.TestCase):
                 },
             )
 
+    def test_scent_matches_show_known_and_unknown_wear_profile_facts(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+            self.add_wear_profiles(
+                database,
+                [
+                    (1, "moderate", "soft"),
+                    (2, "long-lasting", "moderate"),
+                    (4, None, None),
+                ],
+            )
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+                "--limit",
+                "3",
+                "--show-wear-profiles",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            response = json.loads(matched.stdout)
+            self.assertEqual(
+                response["reference"]["wear_profile"],
+                {
+                    "longevity": "long-lasting",
+                    "projection": "moderate",
+                    "skin_notice": "Wear Profile facts are reported catalog observations, not a guarantee for every person's skin.",
+                },
+            )
+            self.assertEqual(
+                [
+                    (result["fragrance_edition_id"], result["wear_profile"])
+                    for result in response["results"]
+                ],
+                [
+                    (
+                        1,
+                        {
+                            "longevity": "moderate",
+                            "projection": "soft",
+                            "skin_notice": "Wear Profile facts are reported catalog observations, not a guarantee for every person's skin.",
+                        },
+                    ),
+                    (
+                        4,
+                        {
+                            "longevity": "unknown",
+                            "projection": "unknown",
+                            "skin_notice": "Wear Profile facts are reported catalog observations, not a guarantee for every person's skin.",
+                        },
+                    ),
+                ],
+            )
+
+    def test_wear_profile_filters_keep_scent_match_values_unchanged(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+            self.add_wear_profiles(
+                database,
+                [
+                    (1, "moderate", "soft"),
+                    (2, "long-lasting", "moderate"),
+                    (4, None, None),
+                ],
+            )
+
+            unfiltered = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+                "--show-wear-profiles",
+            )
+            filtered = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+                "--show-wear-profiles",
+                "--wear-longevity",
+                "moderate",
+                "--wear-projection",
+                "soft",
+            )
+
+            self.assertEqual(unfiltered.returncode, 0, unfiltered.stderr)
+            self.assertEqual(filtered.returncode, 0, filtered.stderr)
+            unfiltered_results = json.loads(unfiltered.stdout)["results"]
+            filtered_results = json.loads(filtered.stdout)["results"]
+            self.assertEqual(
+                [result["fragrance_edition_id"] for result in filtered_results],
+                [1],
+            )
+            self.assertEqual(
+                filtered_results[0]["scent_match"],
+                unfiltered_results[0]["scent_match"],
+            )
+            self.assertEqual(
+                filtered_results[0]["profile_comparison"],
+                unfiltered_results[0]["profile_comparison"],
+            )
+
     def test_exact_scent_match_records_versioned_384_number_embeddings(
         self,
     ) -> None:
@@ -1533,6 +1647,34 @@ class CatalogWorkflowTests(unittest.TestCase):
                     (fragrance_edition_id, bottle_size_ml, amount_usd,
                      observed_on, source_name, source_url)
                 VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def add_wear_profiles(
+        self,
+        database: Path,
+        rows: list[tuple[int, str | None, str | None]],
+    ) -> None:
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE wear_profiles (
+                    fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+                    longevity TEXT,
+                    projection TEXT
+                )
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO wear_profiles
+                    (fragrance_edition_id, longevity, projection)
+                VALUES (?, ?, ?)
                 """,
                 rows,
             )

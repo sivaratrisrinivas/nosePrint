@@ -340,6 +340,11 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             source_name TEXT,
             source_url TEXT
         );
+        CREATE TABLE IF NOT EXISTS wear_profiles (
+            fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+            longevity TEXT,
+            projection TEXT
+        );
         CREATE TABLE IF NOT EXISTS source_records (
             dataset_id TEXT NOT NULL REFERENCES catalog_sources(dataset_id),
             source_row INTEGER NOT NULL,
@@ -631,6 +636,7 @@ def _scent_matches(args: argparse.Namespace) -> int:
     try:
         _create_embedding_schema(connection)
         _create_comparable_price_schema(connection)
+        _create_wear_profile_schema(connection)
         rows = connection.execute(
             """
             SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
@@ -638,11 +644,13 @@ def _scent_matches(args: argparse.Namespace) -> int:
                    sp.notes_json, sp.main_accords_json, sp.top_notes_json,
                    sp.middle_notes_json, sp.base_notes_json, sp.scent_family,
                    cp.amount_usd, cp.currency, cp.market, cp.bottle_size_ml,
-                   cp.observed_on, cp.source_name, cp.source_url
+                   cp.observed_on, cp.source_name, cp.source_url,
+                   wp.longevity, wp.projection
             FROM fragrance_editions AS fe
             JOIN fragrances AS f ON f.id = fe.fragrance_id
             JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
             LEFT JOIN comparable_prices AS cp ON cp.fragrance_edition_id = fe.id
+            LEFT JOIN wear_profiles AS wp ON wp.fragrance_edition_id = fe.id
             WHERE fe.catalog_kind = 'real'
             ORDER BY fe.id
             """
@@ -684,6 +692,7 @@ def _scent_matches(args: argparse.Namespace) -> int:
                 score,
                 method="exact_cosine",
                 include_price=args.cheaper_only or args.show_prices,
+                include_wear_profile=_include_wear_profile(args),
             )
         )
     exact_ranked_matches.sort(
@@ -730,6 +739,7 @@ def _scent_matches(args: argparse.Namespace) -> int:
                     score,
                     method="qdrant_ann",
                     include_price=args.cheaper_only or args.show_prices,
+                    include_wear_profile=_include_wear_profile(args),
                 )
             )
         ann_ranked_matches.sort(
@@ -766,6 +776,16 @@ def _scent_matches(args: argparse.Namespace) -> int:
             for result in ranked_matches
             if result.get("price_comparison", {}).get("strictly_cheaper") is True
         ]
+    if args.wear_longevity or args.wear_projection:
+        ranked_matches = [
+            result
+            for result in ranked_matches
+            if _matches_wear_profile_filters(
+                result,
+                longevity=args.wear_longevity,
+                projection=args.wear_projection,
+            )
+        ]
     limited_matches = ranked_matches[: args.limit]
     response: dict[str, Any] = {
         "status": "ok" if limited_matches else "no_matches",
@@ -782,11 +802,17 @@ def _scent_matches(args: argparse.Namespace) -> int:
         response["retrieval"] = retrieval
     if args.cheaper_only or args.show_prices:
         response["reference"]["comparable_price"] = _comparable_price(reference)
+    if _include_wear_profile(args):
+        response["reference"]["wear_profile"] = _wear_profile(reference)
     if not limited_matches:
         if args.cheaper_only:
             response["message"] = (
                 "No Real Catalog Scent Matches have known same-size Comparable Prices "
                 "below the selected Fragrance Edition."
+            )
+        elif args.wear_longevity or args.wear_projection:
+            response["message"] = (
+                "No Real Catalog Scent Matches have Wear Profile facts matching those filters."
             )
         else:
             response["message"] = (
@@ -805,6 +831,7 @@ def _scent_match_result(
     *,
     method: str,
     include_price: bool = False,
+    include_wear_profile: bool = False,
 ) -> dict[str, Any]:
     if method == "exact_cosine":
         score_basis = (
@@ -834,6 +861,8 @@ def _scent_match_result(
     if include_price:
         result["comparable_price"] = _comparable_price(row)
         result["price_comparison"] = _price_comparison(reference, row)
+    if include_wear_profile:
+        result["wear_profile"] = _wear_profile(row)
     return result
 
 
@@ -897,6 +926,35 @@ def _price_comparison(reference: sqlite3.Row, candidate: sqlite3.Row) -> dict[st
         "reference_price_per_ml_usd": reference_price["price_per_ml_usd"],
         "candidate_price_per_ml_usd": candidate_price["price_per_ml_usd"],
     }
+
+
+def _wear_profile(row: sqlite3.Row) -> dict[str, str]:
+    return {
+        "longevity": _value_or_unknown(row["longevity"]),
+        "projection": _value_or_unknown(row["projection"]),
+        "skin_notice": (
+            "Wear Profile facts are reported catalog observations, "
+            "not a guarantee for every person's skin."
+        ),
+    }
+
+
+def _include_wear_profile(args: argparse.Namespace) -> bool:
+    return bool(args.show_wear_profiles or args.wear_longevity or args.wear_projection)
+
+
+def _matches_wear_profile_filters(
+    result: dict[str, Any],
+    *,
+    longevity: str | None,
+    projection: str | None,
+) -> bool:
+    wear_profile = result["wear_profile"]
+    if longevity and wear_profile["longevity"].casefold() != longevity.strip().casefold():
+        return False
+    if projection and wear_profile["projection"].casefold() != projection.strip().casefold():
+        return False
+    return True
 
 
 def _qdrant_health(args: argparse.Namespace) -> int:
@@ -1115,6 +1173,18 @@ def _create_comparable_price_schema(connection: sqlite3.Connection) -> None:
             observed_on TEXT,
             source_name TEXT,
             source_url TEXT
+        )
+        """
+    )
+
+
+def _create_wear_profile_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS wear_profiles (
+            fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+            longevity TEXT,
+            projection TEXT
         )
         """
     )
@@ -1392,6 +1462,19 @@ def _parser() -> argparse.ArgumentParser:
         "--cheaper-only",
         action="store_true",
         help="Return only Scent Matches with same-size known Comparable Prices below the reference price",
+    )
+    scent_matches.add_argument(
+        "--show-wear-profiles",
+        action="store_true",
+        help="Include Wear Profile longevity and projection facts without changing Scent Match scores",
+    )
+    scent_matches.add_argument(
+        "--wear-longevity",
+        help="Return only alternatives with this known Wear Profile longevity fact",
+    )
+    scent_matches.add_argument(
+        "--wear-projection",
+        help="Return only alternatives with this known Wear Profile projection fact",
     )
     scent_matches.set_defaults(handler=_scent_matches)
 
