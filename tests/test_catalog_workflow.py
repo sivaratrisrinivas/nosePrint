@@ -1245,6 +1245,220 @@ class CatalogWorkflowTests(unittest.TestCase):
             self.assertEqual(browse_response["status"], "no_matches")
             self.assertEqual(browse_response["results"], [])
 
+    def test_scale_test_catalog_generation_is_deterministic_and_not_shopper_inventory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            first_database = workspace / "first.sqlite3"
+            second_database = workspace / "second.sqlite3"
+
+            first_generated = self.run_catalog(
+                "generate-scale-test-catalog",
+                "--database",
+                str(first_database),
+                "--records",
+                "5",
+                "--seed",
+                "1234",
+            )
+            second_generated = self.run_catalog(
+                "generate-scale-test-catalog",
+                "--database",
+                str(second_database),
+                "--records",
+                "5",
+                "--seed",
+                "1234",
+            )
+            browsed = self.run_catalog(
+                "browse",
+                "--database",
+                str(first_database),
+                "--query",
+                "Scale Test",
+            )
+
+            self.assertEqual(first_generated.returncode, 0, first_generated.stderr)
+            self.assertEqual(second_generated.returncode, 0, second_generated.stderr)
+            self.assertEqual(
+                json.loads(first_generated.stdout),
+                {
+                    "status": "generated",
+                    "scale_test_catalog": {
+                        "dataset_id": "scale-test-catalog-v1",
+                        "records": 5,
+                        "seed": 1234,
+                        "catalog_kind": "scale-test",
+                        "separation_notice": (
+                            "Scale-Test Catalog records are generated for benchmarks "
+                            "only and are not Real Catalog shopping inventory."
+                        ),
+                    },
+                },
+            )
+            self.assertEqual(
+                self.scale_test_catalog_snapshot(first_database),
+                self.scale_test_catalog_snapshot(second_database),
+            )
+            self.assertEqual(
+                {
+                    row["catalog_kind"]
+                    for row in self.scale_test_catalog_snapshot(first_database)
+                },
+                {"scale-test"},
+            )
+            self.assertEqual(browsed.returncode, 0, browsed.stderr)
+            self.assertEqual(json.loads(browsed.stdout)["status"], "no_matches")
+            self.assertEqual(json.loads(browsed.stdout)["results"], [])
+
+    def test_scale_test_benchmark_uses_separate_ann_path_and_reports_recall(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "scale-test-qdrant-index.json"
+            self.run_catalog(
+                "generate-scale-test-catalog",
+                "--database",
+                str(database),
+                "--records",
+                "6",
+                "--seed",
+                "1234",
+            )
+
+            benchmarked = self.run_catalog(
+                "benchmark-scale-test-catalog",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                "--reference-edition-id",
+                "1000001",
+                "--limit",
+                "3",
+            )
+            browsed = self.run_catalog(
+                "browse",
+                "--database",
+                str(database),
+                "--query",
+                "Scale Test",
+            )
+
+            self.assertEqual(benchmarked.returncode, 0, benchmarked.stderr)
+            report = json.loads(benchmarked.stdout)
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(report["catalog"], {"kind": "scale-test", "size": 6})
+            self.assertEqual(
+                report["configuration"],
+                {
+                    "top_k": 3,
+                    "embedding": {
+                        "model": "noseprint-hash-embedding-384",
+                        "model_version": "1",
+                        "pipeline_version": "scent-profile-serialization-v1",
+                        "dimensions": 384,
+                        "runtime_device": "cpu",
+                    },
+                    "exact": {"method": "exact_cosine"},
+                    "qdrant_ann": {
+                        "method": "qdrant_ann",
+                        "index_status": "rebuilt",
+                        "index_schema_version": "qdrant-scale-test-index-v1",
+                        "index_path": str(index),
+                    },
+                },
+            )
+            self.assertEqual(report["metrics"]["recall_at_k"], 1.0)
+            self.assertEqual(report["metrics"]["embedding_latency_ms"], 0)
+            self.assertEqual(report["metrics"]["retrieval_latency_ms"], 0)
+            self.assertEqual(report["metrics"]["hydration_latency_ms"], 0)
+            self.assertEqual(len(report["exact_cosine"]["retrieved_ids"]), 3)
+            self.assertEqual(
+                report["exact_cosine"]["retrieved_ids"],
+                report["qdrant_ann"]["retrieved_ids"],
+            )
+            index_document = json.loads(index.read_text(encoding="utf-8"))
+            self.assertEqual(
+                index_document["metadata"]["index_schema_version"],
+                "qdrant-scale-test-index-v1",
+            )
+            self.assertEqual(
+                {
+                    point["payload"]["catalog_kind"]
+                    for point in index_document["points"]
+                },
+                {"scale-test"},
+            )
+            self.assertEqual(browsed.returncode, 0, browsed.stderr)
+            self.assertEqual(json.loads(browsed.stdout)["results"], [])
+
+    def test_shopper_ann_search_ignores_malformed_scale_test_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            real_index = workspace / "qdrant-index.json"
+            scale_index = workspace / "scale-test-qdrant-index.json"
+            self.create_browse_fixture(database)
+            self.run_catalog(
+                "rebuild-qdrant-index",
+                "--database",
+                str(database),
+                "--index",
+                str(real_index),
+            )
+            self.run_catalog(
+                "benchmark-scale-test-catalog",
+                "--database",
+                str(database),
+                "--index",
+                str(scale_index),
+                "--reference-edition-id",
+                "3",
+                "--limit",
+                "1",
+            )
+            real_index_document = json.loads(real_index.read_text(encoding="utf-8"))
+            scale_point = json.loads(scale_index.read_text(encoding="utf-8"))[
+                "points"
+            ][0]
+            forged_point = {
+                "id": scale_point["id"],
+                "vector": scale_point["vector"],
+                "payload": {
+                    "fragrance_edition_id": 1,
+                    "catalog_kind": "real",
+                },
+            }
+            real_index_document["points"].append(forged_point)
+            real_index.write_text(
+                json.dumps(real_index_document, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--index",
+                str(real_index),
+                "--edition-id",
+                "2",
+                "--limit",
+                "3",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            response = json.loads(matched.stdout)
+            self.assertEqual(
+                [result["fragrance_edition_id"] for result in response["results"]],
+                [1, 4],
+            )
+            self.assertNotIn("Sample Rose Load Test", matched.stdout)
+
     def test_scent_match_labels_strong_and_surprising_profile_comparisons(
         self,
     ) -> None:
@@ -2121,6 +2335,26 @@ class CatalogWorkflowTests(unittest.TestCase):
                     "SELECT COUNT(*) FROM fragrance_editions"
                 ).fetchone()[0],
             }
+        finally:
+            connection.close()
+
+    def scale_test_catalog_snapshot(self, database: Path) -> list[dict[str, object]]:
+        connection = sqlite3.connect(database)
+        connection.row_factory = sqlite3.Row
+        try:
+            rows = connection.execute(
+                """
+                SELECT fe.id, f.name AS fragrance, f.brand, fe.name AS edition,
+                       fe.concentration, fe.catalog_kind, sp.notes_json,
+                       sp.main_accords_json, sp.top_notes_json, sp.middle_notes_json,
+                       sp.base_notes_json, sp.scent_family
+                FROM fragrance_editions AS fe
+                JOIN fragrances AS f ON f.id = fe.fragrance_id
+                JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
+                ORDER BY fe.id
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
         finally:
             connection.close()
 

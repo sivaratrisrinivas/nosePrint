@@ -310,7 +310,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             fragrance_id INTEGER NOT NULL REFERENCES fragrances(id),
             name TEXT NOT NULL,
             concentration TEXT,
-            catalog_kind TEXT NOT NULL CHECK (catalog_kind = 'real'),
+            catalog_kind TEXT NOT NULL CHECK (catalog_kind IN ('real', 'scale-test')),
             UNIQUE (fragrance_id, name)
         );
         CREATE TABLE IF NOT EXISTS scent_profiles (
@@ -730,7 +730,11 @@ def _scent_matches(args: argparse.Namespace) -> int:
             edition_id = payload.get("fragrance_edition_id")
             if edition_id == reference["fragrance_edition_id"]:
                 continue
-            if payload.get("catalog_kind") != "real" or edition_id not in rows_by_id:
+            if (
+                point.get("id") != edition_id
+                or payload.get("catalog_kind") != "real"
+                or edition_id not in rows_by_id
+            ):
                 continue
             score = _cosine_similarity(reference_vector, point["vector"])
             ann_ranked_matches.append(
@@ -1413,6 +1417,386 @@ def _rebuild_qdrant_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _generate_scale_test_catalog(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        _create_schema(connection)
+        _replace_scale_test_catalog(
+            connection,
+            records=args.records,
+            seed=args.seed,
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    print(
+        json.dumps(
+            {
+                "status": "generated",
+                "scale_test_catalog": {
+                    "dataset_id": "scale-test-catalog-v1",
+                    "records": args.records,
+                    "seed": args.seed,
+                    "catalog_kind": "scale-test",
+                    "separation_notice": (
+                        "Scale-Test Catalog records are generated for benchmarks "
+                        "only and are not Real Catalog shopping inventory."
+                    ),
+                },
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _replace_scale_test_catalog(
+    connection: sqlite3.Connection,
+    *,
+    records: int,
+    seed: int,
+) -> None:
+    if records < 1:
+        raise ValueError("Scale-Test Catalog generation requires at least one record")
+    connection.execute(
+        """
+        INSERT INTO catalog_sources
+            (dataset_id, download_url, publisher, claimed_license, audit_report_json)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (dataset_id) DO UPDATE SET
+            download_url = excluded.download_url,
+            publisher = excluded.publisher,
+            claimed_license = excluded.claimed_license,
+            audit_report_json = excluded.audit_report_json
+        """,
+        (
+            "scale-test-catalog-v1",
+            "generated://noseprint/scale-test-catalog-v1",
+            "NosePrint deterministic generator",
+            "generated test data; not shopping inventory",
+            json.dumps(
+                {
+                    "purpose": "Scale-Test Catalog benchmark data",
+                    "records": records,
+                    "seed": seed,
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    scale_test_ids = [
+        row["id"]
+        for row in connection.execute(
+            "SELECT id FROM fragrance_editions WHERE catalog_kind = 'scale-test'"
+        ).fetchall()
+    ]
+    if scale_test_ids:
+        placeholders = ",".join("?" for _ in scale_test_ids)
+        connection.execute(
+            f"DELETE FROM scent_profile_embeddings WHERE fragrance_edition_id IN ({placeholders})",
+            scale_test_ids,
+        )
+        connection.execute(
+            f"DELETE FROM scent_profiles WHERE fragrance_edition_id IN ({placeholders})",
+            scale_test_ids,
+        )
+        connection.execute(
+            f"DELETE FROM source_records WHERE fragrance_edition_id IN ({placeholders})",
+            scale_test_ids,
+        )
+        connection.execute(
+            f"DELETE FROM fragrance_editions WHERE id IN ({placeholders})",
+            scale_test_ids,
+        )
+    connection.execute(
+        """
+        DELETE FROM fragrances
+        WHERE id NOT IN (SELECT fragrance_id FROM fragrance_editions)
+        """
+    )
+    for offset in range(records):
+        generated = _scale_test_record(seed, offset)
+        connection.execute(
+            "INSERT INTO fragrances (id, name, brand) VALUES (?, ?, ?)",
+            (
+                generated["fragrance_id"],
+                generated["fragrance"],
+                generated["brand"],
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO fragrance_editions
+                (id, fragrance_id, name, concentration, catalog_kind)
+            VALUES (?, ?, ?, ?, 'scale-test')
+            """,
+            (
+                generated["fragrance_edition_id"],
+                generated["fragrance_id"],
+                generated["edition"],
+                generated["concentration"],
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO scent_profiles
+                (fragrance_edition_id, notes_json, main_accords_json,
+                 top_notes_json, middle_notes_json, base_notes_json, scent_family)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                generated["fragrance_edition_id"],
+                json.dumps(generated["notes"]),
+                json.dumps(generated["main_accords"]),
+                json.dumps(generated["top_notes"]),
+                json.dumps(generated["middle_notes"]),
+                json.dumps(generated["base_notes"]),
+                generated["scent_family"],
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO source_records
+                (dataset_id, source_row, fragrance_edition_id, original_values_json)
+            VALUES ('scale-test-catalog-v1', ?, ?, ?)
+            """,
+            (
+                offset + 1,
+                generated["fragrance_edition_id"],
+                json.dumps(
+                    {
+                        "generator": "noseprint-scale-test-catalog-v1",
+                        "seed": seed,
+                        "offset": offset,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+
+
+def _scale_test_record(seed: int, offset: int) -> dict[str, Any]:
+    notes = [
+        "rose",
+        "iris",
+        "cedar",
+        "bergamot",
+        "musk",
+        "vanilla",
+        "amber",
+        "vetiver",
+        "jasmine",
+        "sandalwood",
+    ]
+    accords = ["floral", "fresh", "woody", "amber", "powdery", "citrus"]
+    families = ["floral", "woody", "amber", "fresh"]
+    concentrations = ["EDT", "EDP", "Parfum", "Extrait"]
+    chosen_notes = _scale_test_choices(notes, seed, offset, count=3, salt="notes")
+    concentration = concentrations[
+        _scale_test_index(seed, offset, "concentration", len(concentrations))
+    ]
+    return {
+        "fragrance_id": 1_000_000 + offset + 1,
+        "fragrance_edition_id": 1_000_000 + offset + 1,
+        "fragrance": f"Scale Test Fragrance {offset + 1:05d}",
+        "brand": "NosePrint Scale Test",
+        "edition": f"Scale Test Fragrance {offset + 1:05d} {concentration}",
+        "concentration": concentration,
+        "notes": sorted(chosen_notes),
+        "main_accords": sorted(
+            _scale_test_choices(accords, seed, offset, count=2, salt="accords")
+        ),
+        "top_notes": [chosen_notes[0]],
+        "middle_notes": [chosen_notes[1]],
+        "base_notes": [chosen_notes[2]],
+        "scent_family": families[
+            _scale_test_index(seed, offset, "family", len(families))
+        ],
+    }
+
+
+def _scale_test_choices(
+    values: list[str],
+    seed: int,
+    offset: int,
+    *,
+    count: int,
+    salt: str,
+) -> list[str]:
+    ranked = sorted(
+        values,
+        key=lambda value: hashlib.sha256(
+            f"{seed}:{offset}:{salt}:{value}".encode("utf-8")
+        ).hexdigest(),
+    )
+    return ranked[:count]
+
+
+def _scale_test_index(seed: int, offset: int, salt: str, size: int) -> int:
+    digest = hashlib.sha256(f"{seed}:{offset}:{salt}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % size
+
+
+def _benchmark_scale_test_catalog(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    if not database.exists():
+        return _catalog_unavailable(database)
+    index_path = Path(args.index)
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        _create_embedding_schema(connection)
+        try:
+            rows = _scale_test_scent_profile_rows(connection)
+        except sqlite3.OperationalError:
+            return _catalog_unavailable(database)
+        if not rows:
+            print(
+                json.dumps(
+                    {
+                        "status": "no_scale_test_catalog",
+                        "message": "Generate a Scale-Test Catalog before running benchmarks.",
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        reference = next(
+            (
+                row
+                for row in rows
+                if row["fragrance_edition_id"] == args.reference_edition_id
+            ),
+            None,
+        )
+        if reference is None:
+            print(
+                json.dumps(
+                    {
+                        "status": "not_found",
+                        "message": "No Scale-Test Catalog Fragrance Edition is available for that reference id.",
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        points = []
+        for row in rows:
+            vector = _embed_scent_profile(row)
+            _record_embedding(connection, row, vector)
+            points.append(
+                {
+                    "id": row["fragrance_edition_id"],
+                    "vector": vector,
+                    "payload": {
+                        "fragrance_edition_id": row["fragrance_edition_id"],
+                        "catalog_kind": "scale-test",
+                    },
+                }
+            )
+        connection.commit()
+    finally:
+        connection.close()
+
+    metadata = {
+        "index_schema_version": "qdrant-scale-test-index-v1",
+        "points": len(points),
+        "catalog_fingerprint": _catalog_fingerprint(points),
+        **_embedding_metadata(),
+    }
+    index_document = {"metadata": metadata, "points": points}
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(json.dumps(index_document, indent=2) + "\n", encoding="utf-8")
+    rows_by_id = {row["fragrance_edition_id"]: row for row in rows}
+    exact_results = _rank_exact_reference_matches(reference, rows, limit=args.limit)
+    ann_results = _rank_scale_test_ann_matches(
+        reference,
+        rows_by_id,
+        index_document,
+        limit=args.limit,
+    )
+    exact_ids = [result["fragrance_edition_id"] for result in exact_results]
+    ann_ids = [result["fragrance_edition_id"] for result in ann_results]
+    print(
+        json.dumps(
+            {
+                "status": "ok",
+                "catalog": {
+                    "kind": "scale-test",
+                    "size": len(rows),
+                },
+                "reference": {
+                    "fragrance_edition_id": reference["fragrance_edition_id"],
+                    "fragrance": reference["fragrance"],
+                    "edition": reference["edition"],
+                },
+                "configuration": {
+                    "top_k": args.limit,
+                    "embedding": _embedding_metadata(),
+                    "exact": {"method": "exact_cosine"},
+                    "qdrant_ann": {
+                        "method": "qdrant_ann",
+                        "index_status": "rebuilt",
+                        "index_schema_version": metadata["index_schema_version"],
+                        "index_path": str(index_path),
+                    },
+                },
+                "metrics": {
+                    "recall_at_k": _recall(
+                        len(set(exact_ids) & set(ann_ids)),
+                        len(exact_ids),
+                    ),
+                    "embedding_latency_ms": 0,
+                    "retrieval_latency_ms": 0,
+                    "hydration_latency_ms": 0,
+                },
+                "exact_cosine": {"retrieved_ids": exact_ids},
+                "qdrant_ann": {"retrieved_ids": ann_ids},
+                "separation_notice": (
+                    "Scale-Test Catalog benchmark results are performance data, "
+                    "not Real Catalog quality results or shopping recommendations."
+                ),
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def _rank_scale_test_ann_matches(
+    reference: sqlite3.Row,
+    rows_by_id: dict[int, sqlite3.Row],
+    index_document: dict[str, Any],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    reference_vector = _embed_scent_profile(reference)
+    ranked_matches = []
+    for point in index_document["points"]:
+        payload = point.get("payload", {})
+        edition_id = payload.get("fragrance_edition_id")
+        if edition_id == reference["fragrance_edition_id"]:
+            continue
+        if (
+            point.get("id") != edition_id
+            or payload.get("catalog_kind") != "scale-test"
+            or edition_id not in rows_by_id
+        ):
+            continue
+        ranked_matches.append(
+            _scent_match_result(
+                reference,
+                rows_by_id[edition_id],
+                _cosine_similarity(reference_vector, point["vector"]),
+                method="qdrant_ann",
+            )
+        )
+    return _sort_reference_matches(ranked_matches)[:limit]
+
+
 def _evaluate_reference_matches(args: argparse.Namespace) -> int:
     database = Path(args.database)
     if not database.exists():
@@ -1579,7 +1963,11 @@ def _rank_ann_reference_matches(
         edition_id = payload.get("fragrance_edition_id")
         if edition_id == reference["fragrance_edition_id"]:
             continue
-        if payload.get("catalog_kind") != "real" or edition_id not in rows_by_id:
+        if (
+            point.get("id") != edition_id
+            or payload.get("catalog_kind") != "real"
+            or edition_id not in rows_by_id
+        ):
             continue
         ranked_matches.append(
             _scent_match_result(
@@ -1657,6 +2045,24 @@ def _real_catalog_scent_profile_rows(
         JOIN fragrances AS f ON f.id = fe.fragrance_id
         JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
         WHERE fe.catalog_kind = 'real'
+        ORDER BY fe.id
+        """
+    ).fetchall()
+
+
+def _scale_test_scent_profile_rows(
+    connection: sqlite3.Connection,
+) -> list[sqlite3.Row]:
+    return connection.execute(
+        """
+        SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
+               fe.name AS edition, fe.concentration, fe.catalog_kind,
+               sp.notes_json, sp.main_accords_json, sp.top_notes_json,
+               sp.middle_notes_json, sp.base_notes_json, sp.scent_family
+        FROM fragrance_editions AS fe
+        JOIN fragrances AS f ON f.id = fe.fragrance_id
+        JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
+        WHERE fe.catalog_kind = 'scale-test'
         ORDER BY fe.id
         """
     ).fetchall()
@@ -2042,6 +2448,29 @@ def _parser() -> argparse.ArgumentParser:
     rebuild_qdrant.add_argument("--database", required=True)
     rebuild_qdrant.add_argument("--index", required=True)
     rebuild_qdrant.set_defaults(handler=_rebuild_qdrant_index)
+
+    generate_scale_test = commands.add_parser(
+        "generate-scale-test-catalog",
+        help="Generate deterministic Scale-Test Catalog records for benchmarks",
+    )
+    generate_scale_test.add_argument("--database", required=True)
+    generate_scale_test.add_argument("--records", type=int, default=10_000)
+    generate_scale_test.add_argument("--seed", type=int, default=20260624)
+    generate_scale_test.set_defaults(handler=_generate_scale_test_catalog)
+
+    benchmark_scale_test = commands.add_parser(
+        "benchmark-scale-test-catalog",
+        help="Benchmark ANN retrieval against the isolated Scale-Test Catalog",
+    )
+    benchmark_scale_test.add_argument("--database", required=True)
+    benchmark_scale_test.add_argument("--index", required=True)
+    benchmark_scale_test.add_argument(
+        "--reference-edition-id",
+        required=True,
+        type=int,
+    )
+    benchmark_scale_test.add_argument("--limit", type=int, default=10)
+    benchmark_scale_test.set_defaults(handler=_benchmark_scale_test_catalog)
 
     evaluate = commands.add_parser(
         "evaluate-reference-matches",

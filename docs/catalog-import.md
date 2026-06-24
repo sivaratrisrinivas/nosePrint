@@ -345,3 +345,54 @@ Reference Match Set JSON is evaluation data only. It is kept separate from Real
 Catalog source imports, Scent Profile embeddings, training data, and user
 activity. Running the evaluator does not create Fragrances or Fragrance
 Editions and does not change shopper browse results.
+
+## Generate a Scale-Test Catalog
+
+Use the Scale-Test Catalog when you need performance data at a larger size than
+the provenance-checked Real Catalog can safely provide:
+
+```bash
+python3 -m noseprint.catalog generate-scale-test-catalog \
+  --database var/noseprint.sqlite3 \
+  --records 10000 \
+  --seed 20260624
+```
+
+The generator is deterministic: the same seed and record count produce the same
+generated Fragrance Editions on repeated runs. Each generated row is stored in
+SQLite with `catalog_kind: "scale-test"` and a generated source id of
+`scale-test-catalog-v1`. These rows are benchmark material only. They are not
+Real Catalog records, purchasable inventory, training data, Reference Match Set
+quality data, or user activity.
+
+Normal shopper workflows keep filtering below presentation code with
+`catalog_kind = 'real'`. That includes browsing, selected-edition Scent Matches,
+Scent Request search, Comparable Price filtering, and Wear Profile filtering.
+
+## Benchmark the Scale-Test Catalog
+
+Run Scale-Test performance measurements through the explicit benchmark path:
+
+```bash
+python3 -m noseprint.catalog benchmark-scale-test-catalog \
+  --database var/noseprint.sqlite3 \
+  --index var/scale-test-qdrant-index.json \
+  --reference-edition-id 1000001 \
+  --limit 10
+```
+
+The benchmark command reads only `scale-test` rows, writes a separate
+`qdrant-scale-test-index-v1` index, and reports:
+
+- catalog size
+- exact-cosine configuration
+- Qdrant ANN configuration
+- recall-at-k
+- embedding latency
+- retrieval latency
+- hydration latency
+
+The normal shopping Qdrant index continues to use the `qdrant-index-v1` schema
+and Real Catalog payloads. Shopper ANN search rejects malformed points whose
+point id, payload `fragrance_edition_id`, payload `catalog_kind`, and SQLite
+Real Catalog row do not agree.

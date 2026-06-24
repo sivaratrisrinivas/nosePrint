@@ -60,7 +60,7 @@ Run the test suite with:
 python3 -m unittest discover -v
 ```
 
-The catalog workflow has eleven commands:
+The catalog workflow has thirteen commands:
 
 1. `audit` checks a candidate Real Catalog source and writes a report.
 2. `import` accepts only the exact file that received a passing report, unless
@@ -80,6 +80,10 @@ The catalog workflow has eleven commands:
     without turning the index into the catalog source of truth.
 11. `evaluate-reference-matches` compares exact-cosine and Qdrant ANN retrieval
     against a separate Reference Match Set answer key.
+12. `generate-scale-test-catalog` creates a deterministic generated Scale-Test
+    Catalog for performance experiments.
+13. `benchmark-scale-test-catalog` measures exact-cosine versus Qdrant ANN
+    retrieval over the isolated Scale-Test Catalog.
 
 See [how to run the catalog workflow](docs/catalog-import.md) for complete
 commands.
@@ -220,6 +224,28 @@ training, inferred from user activity, or included in Scent Profile embeddings.
 See [Reference Match Set evaluation](docs/reference-match-set.md) for the
 documented answer-key format and report fields.
 
+Generate and benchmark an isolated Scale-Test Catalog:
+
+```bash
+python3 -m noseprint.catalog generate-scale-test-catalog \
+  --database var/noseprint.sqlite3 \
+  --records 10000 \
+  --seed 20260624
+
+python3 -m noseprint.catalog benchmark-scale-test-catalog \
+  --database var/noseprint.sqlite3 \
+  --index var/scale-test-qdrant-index.json \
+  --reference-edition-id 1000001 \
+  --limit 10
+```
+
+The generated records are stored with `catalog_kind: "scale-test"` and indexed
+with a separate `qdrant-scale-test-index-v1` schema. Benchmark reports include
+catalog size, exact-cosine configuration, Qdrant ANN configuration, recall-at-k,
+embedding latency, retrieval latency, and hydration latency. These performance
+results stay separate from Reference Match Set quality evaluation and normal
+shopping Scent Matches.
+
 ## Current Guarantees
 
 - Inconclusive catalog audits are blocked unless the owner explicitly accepts
@@ -258,6 +284,10 @@ documented answer-key format and report fields.
 - Reference Match Set data is kept separate from Real Catalog imports,
   embeddings, training data, and user activity. Evaluation reports use it as an
   answer key without changing shopper catalog results.
+- Scale-Test Catalog data is deterministic generated benchmark data, not Real
+  Catalog shopping inventory. Normal browse, selected-edition, Scent Request,
+  Comparable Price, and Wear Profile workflows keep enforcing Real Catalog
+  eligibility below presentation code.
 
 ## Learning Notes
 
@@ -268,7 +298,8 @@ owner. Product code should remain usable without reading those learning files.
 
 ## Direction
 
-The next project step is layering shopper filters and evaluation workflows on
-top of the truthful SQLite Real Catalog, exact-cosine baseline, and rebuildable
-ANN index. The important rule remains the same: search can get faster and more
+The next project step is hardening local startup, health reporting, and recovery
+around the truthful SQLite Real Catalog, exact-cosine baseline, rebuildable ANN
+index, Reference Match Set evaluation, and isolated Scale-Test Catalog
+benchmark. The important rule remains the same: search can get faster and more
 useful, but catalog facts must stay traceable and honest.
