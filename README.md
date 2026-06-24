@@ -17,11 +17,12 @@ NosePrint separates three ideas that are easy to blur:
 
 The current application is a Python command-line workflow backed by SQLite. It
 can audit a candidate data source, import accepted Real Catalog records, browse
-Fragrance Editions by Fragrance name, inspect a selected Scent Profile, find
-exact-cosine Scent Matches for a selected Fragrance Edition, and serve those
-matches through a rebuildable Qdrant-style ANN index. Scent Matches can also be
-annotated and filtered by Comparable Prices and Wear Profile facts without
-changing scent similarity.
+Fragrance Editions by Fragrance name, inspect a selected Scent Profile, interpret
+a beginner Scent Request, find exact-cosine Scent Matches for a selected
+Fragrance Edition or confirmed Scent Request, and serve selected-edition matches
+through a rebuildable Qdrant-style ANN index. Scent Matches can also be annotated
+and filtered by Comparable Prices and Wear Profile facts without changing scent
+similarity.
 
 SQLite is the catalog source of truth. Future search indexes, including vector
 search, should be rebuildable helpers rather than competing master copies.
@@ -59,7 +60,7 @@ Run the test suite with:
 python3 -m unittest discover -v
 ```
 
-The catalog workflow has nine commands:
+The catalog workflow has ten commands:
 
 1. `audit` checks a candidate Real Catalog source and writes a report.
 2. `import` accepts only the exact file that received a passing report, unless
@@ -71,9 +72,11 @@ The catalog workflow has nine commands:
 7. `scent-matches` returns ranked exact-cosine Scent Matches from the Real
    Catalog with calibrated labels, factual Profile Comparisons, and optional
    Comparable Price and Wear Profile filtering.
-8. `qdrant-health` reports SQLite catalog, embedding runtime, and ANN index
+8. `scent-request` interprets beginner wanted and unwanted scent traits before
+   searching from an ephemeral Scent Request.
+9. `qdrant-health` reports SQLite catalog, embedding runtime, and ANN index
    freshness state.
-9. `rebuild-qdrant-index` rebuilds the ANN index from SQLite Scent Profiles
+10. `rebuild-qdrant-index` rebuilds the ANN index from SQLite Scent Profiles
    without turning the index into the catalog source of truth.
 
 See [how to run the catalog workflow](docs/catalog-import.md) for complete
@@ -149,6 +152,24 @@ Wear Profile facts. Missing Wear Profile facts remain `unknown` and do not match
 filters. Wear Profile output includes a notice that cataloged longevity and
 projection are not guarantees for every person's skin.
 
+Search from a beginner Scent Request when the shopper does not know a Fragrance
+name:
+
+```bash
+python3 -m noseprint.catalog scent-request \
+  --database var/noseprint.sqlite3 \
+  --wanted "fresh rose" \
+  --unwanted "oud"
+```
+
+The first response shows interpreted wanted and unwanted Scent Profile traits
+using only vocabulary already present in the Real Catalog. Run the same request
+with `--confirm` to search, `--revise-wanted` or `--revise-unwanted` to inspect a
+revised interpretation before searching, or `--cancel` to stop. Confirmed Scent
+Requests use an ephemeral query vector and never create a Fragrance or Fragrance
+Edition. Known unwanted traits are filtered transparently from result candidates
+without mutating catalog rows.
+
 Build and check the ANN index before using the Qdrant retrieval path:
 
 ```bash
@@ -205,6 +226,11 @@ embedding, retrieval, and hydration latency fields.
 - Profile Comparisons report shared, reference-only, and candidate-only main
   accords, note-pyramid facts, and scent family facts from SQLite. Missing facts
   stay `unknown`.
+- Scent Requests are ephemeral query state. They can produce Scent Matches, but
+  they are never persisted as Fragrances or Fragrance Editions.
+- Scent Request interpretation uses known Real Catalog Scent Profile vocabulary
+  only. Empty and unsupported requests return clear states without invented
+  facts; ambiguous terms are shown explicitly.
 - SQLite records versioned 384-number Scent Profile embeddings so future search
   indexes can be rebuilt without becoming the catalog source of truth.
 - The Qdrant-style ANN index is derived from SQLite, freshness-checked before

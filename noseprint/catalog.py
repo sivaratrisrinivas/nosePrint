@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import math
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -824,6 +825,309 @@ def _scent_matches(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scent_request(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    if not database.exists():
+        return _catalog_unavailable(database)
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        try:
+            rows = _real_catalog_scent_profile_rows(connection)
+        except sqlite3.OperationalError:
+            return _catalog_unavailable(database)
+    finally:
+        connection.close()
+
+    wanted_text = (
+        args.revise_wanted if args.revise_wanted is not None else args.wanted
+    )
+    unwanted_text = (
+        args.revise_unwanted if args.revise_unwanted is not None else args.unwanted
+    )
+    interpretation = _interpret_scent_request(
+        wanted_text or "",
+        unwanted_text or "",
+        rows,
+    )
+    if args.cancel:
+        print(
+            json.dumps(
+                {
+                    "status": "canceled",
+                    "scent_request": {
+                        "wanted": wanted_text or "",
+                        "unwanted": unwanted_text or "",
+                    },
+                    "message": (
+                        "Scent Request canceled before searching; "
+                        "the catalog was not changed."
+                    ),
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if args.confirm:
+        response = _confirmed_scent_request_response(
+            wanted_text or "",
+            unwanted_text or "",
+            interpretation,
+            rows,
+            limit=args.limit,
+        )
+        print(json.dumps(response, indent=2))
+        return 0
+    response = {
+        "status": "needs_confirmation",
+        "scent_request": {
+            "wanted": wanted_text or "",
+            "unwanted": unwanted_text or "",
+        },
+        "interpretation": interpretation,
+        "next_actions": {
+            "confirm": "Run again with --confirm to search from this interpreted Scent Request.",
+            "revise": "Run again with --revise-wanted or --revise-unwanted to inspect a revised interpretation before searching.",
+            "cancel": "Run again with --cancel to stop without searching.",
+        },
+    }
+    print(json.dumps(response, indent=2))
+    return 0
+
+
+def _confirmed_scent_request_response(
+    wanted_text: str,
+    unwanted_text: str,
+    interpretation: dict[str, Any],
+    rows: list[sqlite3.Row],
+    *,
+    limit: int,
+) -> dict[str, Any]:
+    if not _request_terms(wanted_text):
+        return {
+            "status": "empty",
+            "scent_request": {
+                "wanted": wanted_text,
+                "unwanted": unwanted_text,
+            },
+            "interpretation": interpretation,
+            "message": "Enter at least one wanted Scent Profile trait before searching.",
+            "results": [],
+        }
+    if _request_has_no_known_wanted_traits(interpretation):
+        return {
+            "status": "unsupported",
+            "scent_request": {
+                "wanted": wanted_text,
+                "unwanted": unwanted_text,
+            },
+            "interpretation": interpretation,
+            "message": (
+                "No supported wanted Scent Profile traits were found; "
+                "NosePrint will not invent catalog facts."
+            ),
+            "results": [],
+        }
+    reference = _scent_request_reference(interpretation)
+    reference_vector = _embed_interpreted_scent_request(interpretation)
+    ranked_matches = []
+    excluded_ids = []
+    for row in rows:
+        if _row_has_unwanted_traits(row, interpretation["unwanted_traits"]):
+            excluded_ids.append(row["fragrance_edition_id"])
+            continue
+        candidate_vector = _embed_scent_profile(row)
+        ranked_matches.append(
+            _scent_match_result(
+                reference,
+                row,
+                _cosine_similarity(reference_vector, candidate_vector),
+                method="exact_cosine",
+            )
+        )
+    ranked_matches.sort(
+        key=lambda result: (
+            -result["scent_match"]["model_specific_score"],
+            result["fragrance"],
+            result["edition"],
+            result["fragrance_edition_id"],
+        )
+    )
+    limited_matches = ranked_matches[:limit]
+    response: dict[str, Any] = {
+        "status": "ok" if limited_matches else "no_matches",
+        "scent_request": {
+            "wanted": wanted_text,
+            "unwanted": unwanted_text,
+        },
+        "reference": {
+            "source": "ephemeral_scent_request",
+            "scent_profile": {
+                "main_accords": interpretation["wanted_traits"]["main_accords"]
+                or "unknown",
+                "note_pyramid": {
+                    "top": "unknown",
+                    "middle": "unknown",
+                    "base": "unknown",
+                },
+                "scent_family": interpretation["wanted_traits"]["scent_family"],
+            },
+        },
+        "interpretation": interpretation,
+        "embedding": _embedding_metadata(),
+        "unwanted_trait_filter": {
+            "mode": "exclude_known_matches",
+            "excluded_traits": interpretation["unwanted_traits"],
+            "excluded_fragrance_edition_ids": sorted(excluded_ids),
+            "filter_notice": (
+                "Known unwanted Scent Profile traits are filtered from results "
+                "without changing the catalog."
+            ),
+        },
+        "results": limited_matches,
+    }
+    if not limited_matches:
+        response["message"] = (
+            "No Real Catalog Scent Matches remain after applying the interpreted Scent Request."
+        )
+    return response
+
+
+def _request_has_no_known_wanted_traits(interpretation: dict[str, Any]) -> bool:
+    wanted_traits = interpretation["wanted_traits"]
+    return (
+        not wanted_traits["notes"]
+        and not wanted_traits["main_accords"]
+        and wanted_traits["scent_family"] == "unknown"
+    )
+
+
+def _scent_request_reference(interpretation: dict[str, Any]) -> dict[str, Any]:
+    wanted_traits = interpretation["wanted_traits"]
+    scent_family = wanted_traits["scent_family"]
+    return {
+        "fragrance_edition_id": None,
+        "fragrance": "Scent Request",
+        "edition": "Ephemeral Scent Request",
+        "concentration": None,
+        "catalog_kind": "scent-request",
+        "notes_json": json.dumps(wanted_traits["notes"]),
+        "main_accords_json": json.dumps(wanted_traits["main_accords"]),
+        "top_notes_json": None,
+        "middle_notes_json": None,
+        "base_notes_json": None,
+        "scent_family": None if scent_family == "unknown" else scent_family,
+    }
+
+
+def _embed_interpreted_scent_request(interpretation: dict[str, Any]) -> list[float]:
+    vector = [0.0] * EMBEDDING_DIMENSIONS
+    wanted_traits = interpretation["wanted_traits"]
+    tokens = [
+        *[f"notes:{value}" for value in wanted_traits["notes"]],
+        *[f"main_accord:{value}" for value in wanted_traits["main_accords"]],
+    ]
+    if wanted_traits["scent_family"] != "unknown":
+        tokens.append(f"scent_family:{wanted_traits['scent_family']}")
+    for token in tokens:
+        vector[_embedding_bucket(token)] += 1.0
+    return vector
+
+
+def _row_has_unwanted_traits(
+    row: sqlite3.Row,
+    unwanted_traits: dict[str, list[str] | str],
+) -> bool:
+    row_notes = _known_json_profile_facts(row["notes_json"]) or set()
+    row_accords = _known_json_profile_facts(row["main_accords_json"]) or set()
+    row_family = _known_scent_family(row["scent_family"])
+    if row_notes & set(unwanted_traits["notes"]):
+        return True
+    if row_accords & set(unwanted_traits["main_accords"]):
+        return True
+    unwanted_family = unwanted_traits["scent_family"]
+    return (
+        unwanted_family != "unknown"
+        and row_family is not None
+        and row_family == unwanted_family
+    )
+
+
+def _interpret_scent_request(
+    wanted_text: str,
+    unwanted_text: str,
+    rows: list[sqlite3.Row],
+) -> dict[str, Any]:
+    vocabulary = _scent_profile_vocabulary(rows)
+    wanted_terms = _request_terms(wanted_text)
+    unwanted_terms = _request_terms(unwanted_text)
+    supported_terms = set().union(*vocabulary.values())
+    unsupported_terms = sorted((wanted_terms | unwanted_terms) - supported_terms)
+    return {
+        "wanted_traits": _interpreted_traits(wanted_terms, vocabulary),
+        "unwanted_traits": _interpreted_traits(unwanted_terms, vocabulary),
+        "unsupported_terms": unsupported_terms,
+        "ambiguous_terms": _ambiguous_request_terms(
+            wanted_terms | unwanted_terms, vocabulary
+        ),
+        "interpretation_notice": (
+            "Scent Request interpretation uses known Real Catalog Scent Profile "
+            "vocabulary only; unsupported terms are not guessed."
+        ),
+    }
+
+
+def _scent_profile_vocabulary(rows: list[sqlite3.Row]) -> dict[str, set[str]]:
+    vocabulary: dict[str, set[str]] = {
+        "notes": set(),
+        "main_accords": set(),
+        "scent_family": set(),
+    }
+    for row in rows:
+        for value in _known_json_profile_facts(row["notes_json"]) or set():
+            vocabulary["notes"].add(value)
+        for value in _known_json_profile_facts(row["main_accords_json"]) or set():
+            vocabulary["main_accords"].add(value)
+        family = _known_scent_family(row["scent_family"])
+        if family is not None:
+            vocabulary["scent_family"].add(family)
+    return vocabulary
+
+
+def _request_terms(text: str) -> set[str]:
+    return {
+        term
+        for term in re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", text.casefold())
+        if term
+    }
+
+
+def _interpreted_traits(
+    terms: set[str], vocabulary: dict[str, set[str]]
+) -> dict[str, list[str] | str]:
+    scent_families = sorted(terms & vocabulary["scent_family"])
+    return {
+        "notes": sorted(terms & vocabulary["notes"]),
+        "main_accords": sorted(terms & vocabulary["main_accords"]),
+        "scent_family": scent_families[0] if scent_families else "unknown",
+    }
+
+
+def _ambiguous_request_terms(
+    terms: set[str], vocabulary: dict[str, set[str]]
+) -> dict[str, list[str]]:
+    ambiguous = {}
+    for term in sorted(terms):
+        categories = [
+            category
+            for category in ("notes", "main_accords", "scent_family")
+            if term in vocabulary[category]
+        ]
+        if len(categories) > 1:
+            ambiguous[term] = categories
+    return ambiguous
+
+
 def _scent_match_result(
     reference: sqlite3.Row,
     row: sqlite3.Row,
@@ -1477,6 +1781,20 @@ def _parser() -> argparse.ArgumentParser:
         help="Return only alternatives with this known Wear Profile projection fact",
     )
     scent_matches.set_defaults(handler=_scent_matches)
+
+    scent_request = commands.add_parser(
+        "scent-request",
+        help="Interpret a beginner Scent Request before searching the Real Catalog",
+    )
+    scent_request.add_argument("--database", required=True)
+    scent_request.add_argument("--wanted", default="")
+    scent_request.add_argument("--unwanted", default="")
+    scent_request.add_argument("--revise-wanted")
+    scent_request.add_argument("--revise-unwanted")
+    scent_request.add_argument("--confirm", action="store_true")
+    scent_request.add_argument("--cancel", action="store_true")
+    scent_request.add_argument("--limit", type=int, default=10)
+    scent_request.set_defaults(handler=_scent_request)
 
     qdrant_health = commands.add_parser(
         "qdrant-health",

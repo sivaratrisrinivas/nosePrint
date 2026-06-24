@@ -196,6 +196,62 @@ shown as `unknown`, and unknown values do not match filters. The response also
 states that Wear Profile facts are reported catalog observations, not a
 guarantee for every person's skin.
 
+## Search from a Scent Request
+
+Use `scent-request` when a shopper knows the kind of scent they want but does
+not know a Fragrance name. First inspect the interpretation:
+
+```bash
+python3 -m noseprint.catalog scent-request \
+  --database var/noseprint.sqlite3 \
+  --wanted "fresh rose" \
+  --unwanted "oud"
+```
+
+The response returns `status: "needs_confirmation"` and shows interpreted
+wanted and unwanted Scent Profile traits. Interpretation is deterministic: it
+only uses note, main accord, and scent family terms already found in Real
+Catalog Scent Profiles. Unsupported words are listed instead of guessed.
+Ambiguous terms are also shown when a word maps to more than one catalog
+vocabulary category.
+
+Revise before searching:
+
+```bash
+python3 -m noseprint.catalog scent-request \
+  --database var/noseprint.sqlite3 \
+  --wanted "fresh rose" \
+  --revise-wanted "floral iris" \
+  --revise-unwanted "fresh"
+```
+
+Cancel before searching:
+
+```bash
+python3 -m noseprint.catalog scent-request \
+  --database var/noseprint.sqlite3 \
+  --wanted "fresh rose" \
+  --cancel
+```
+
+Confirm to search:
+
+```bash
+python3 -m noseprint.catalog scent-request \
+  --database var/noseprint.sqlite3 \
+  --wanted "fresh rose" \
+  --unwanted "oud" \
+  --confirm \
+  --limit 10
+```
+
+Confirmed Scent Requests create an ephemeral query vector from interpreted
+wanted traits, then compare it with Real Catalog Scent Profile vectors. The
+request is not inserted as a Fragrance or Fragrance Edition. Known unwanted
+traits are applied as an explicit candidate filter and the response lists which
+Fragrance Editions were excluded. Empty, unsupported, and no-result requests
+return clear statuses without invented facts.
+
 ## Check and rebuild the Qdrant ANN index
 
 The ANN index is a rebuildable helper derived from SQLite. It stores stable

@@ -524,6 +524,231 @@ class CatalogWorkflowTests(unittest.TestCase):
                 unfiltered_results[0]["profile_comparison"],
             )
 
+    def test_scent_request_interprets_beginner_traits_before_searching(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            interpreted = self.run_catalog(
+                "scent-request",
+                "--database",
+                str(database),
+                "--wanted",
+                "fresh rose",
+                "--unwanted",
+                "oud",
+            )
+
+            self.assertEqual(interpreted.returncode, 0, interpreted.stderr)
+            self.assertEqual(
+                json.loads(interpreted.stdout),
+                {
+                    "status": "needs_confirmation",
+                    "scent_request": {
+                        "wanted": "fresh rose",
+                        "unwanted": "oud",
+                    },
+                    "interpretation": {
+                        "wanted_traits": {
+                            "notes": ["rose"],
+                            "main_accords": ["fresh"],
+                            "scent_family": "unknown",
+                        },
+                        "unwanted_traits": {
+                            "notes": ["oud"],
+                            "main_accords": [],
+                            "scent_family": "unknown",
+                        },
+                        "unsupported_terms": [],
+                        "ambiguous_terms": {},
+                        "interpretation_notice": (
+                            "Scent Request interpretation uses known Real Catalog "
+                            "Scent Profile vocabulary only; unsupported terms are "
+                            "not guessed."
+                        ),
+                    },
+                    "next_actions": {
+                        "confirm": "Run again with --confirm to search from this interpreted Scent Request.",
+                        "revise": (
+                            "Run again with --revise-wanted or --revise-unwanted "
+                            "to inspect a revised interpretation before searching."
+                        ),
+                        "cancel": "Run again with --cancel to stop without searching.",
+                    },
+                },
+            )
+            self.assertNotIn("results", json.loads(interpreted.stdout))
+
+    def test_confirmed_scent_request_returns_matches_without_persisting_request(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+            before_counts = self.catalog_identity_counts(database)
+
+            matched = self.run_catalog(
+                "scent-request",
+                "--database",
+                str(database),
+                "--wanted",
+                "fresh rose",
+                "--unwanted",
+                "oud",
+                "--confirm",
+                "--limit",
+                "3",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            response = json.loads(matched.stdout)
+            self.assertEqual(response["status"], "ok")
+            self.assertEqual(
+                response["reference"]["source"], "ephemeral_scent_request"
+            )
+            self.assertEqual(
+                response["unwanted_trait_filter"],
+                {
+                    "mode": "exclude_known_matches",
+                    "excluded_traits": {
+                        "notes": ["oud"],
+                        "main_accords": [],
+                        "scent_family": "unknown",
+                    },
+                    "excluded_fragrance_edition_ids": [2],
+                    "filter_notice": (
+                        "Known unwanted Scent Profile traits are filtered from "
+                        "results without changing the catalog."
+                    ),
+                },
+            )
+            self.assertEqual(
+                [result["fragrance_edition_id"] for result in response["results"]],
+                [1, 4],
+            )
+            self.assertEqual(
+                response["results"][0]["scent_match"],
+                {
+                    "method": "exact_cosine",
+                    "model_specific_score": 0.5,
+                    "score_basis": (
+                        "Exact cosine over NosePrint Scent Profile embeddings; "
+                        "not a probability or percent-identical claim."
+                    ),
+                    "strength_label": "incomplete",
+                },
+            )
+            self.assertEqual(
+                response["results"][0]["profile_comparison"]["main_accords"],
+                {
+                    "shared": ["fresh"],
+                    "reference_only": [],
+                    "candidate_only": ["floral"],
+                },
+            )
+            self.assertNotIn("Sample Rose Load Test", matched.stdout)
+            self.assertEqual(self.catalog_identity_counts(database), before_counts)
+
+    def test_scent_request_revision_and_cancel_do_not_search_or_persist(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+            before_counts = self.catalog_identity_counts(database)
+
+            revised = self.run_catalog(
+                "scent-request",
+                "--database",
+                str(database),
+                "--wanted",
+                "rose",
+                "--revise-wanted",
+                "floral iris",
+                "--revise-unwanted",
+                "fresh",
+            )
+            canceled = self.run_catalog(
+                "scent-request",
+                "--database",
+                str(database),
+                "--wanted",
+                "rose",
+                "--cancel",
+            )
+
+            self.assertEqual(revised.returncode, 0, revised.stderr)
+            self.assertEqual(canceled.returncode, 0, canceled.stderr)
+            revised_response = json.loads(revised.stdout)
+            self.assertEqual(revised_response["status"], "needs_confirmation")
+            self.assertEqual(
+                revised_response["scent_request"],
+                {"wanted": "floral iris", "unwanted": "fresh"},
+            )
+            self.assertEqual(
+                revised_response["interpretation"]["ambiguous_terms"],
+                {"floral": ["main_accords", "scent_family"]},
+            )
+            self.assertNotIn("results", revised_response)
+            self.assertEqual(json.loads(canceled.stdout)["status"], "canceled")
+            self.assertEqual(self.catalog_identity_counts(database), before_counts)
+
+    def test_scent_request_handles_empty_unsupported_and_no_result_requests(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            empty = self.run_catalog(
+                "scent-request",
+                "--database",
+                str(database),
+                "--wanted",
+                "   ",
+                "--confirm",
+            )
+            unsupported = self.run_catalog(
+                "scent-request",
+                "--database",
+                str(database),
+                "--wanted",
+                "sparkly dragon",
+                "--confirm",
+            )
+            no_result = self.run_catalog(
+                "scent-request",
+                "--database",
+                str(database),
+                "--wanted",
+                "rose",
+                "--unwanted",
+                "rose iris",
+                "--confirm",
+            )
+
+            self.assertEqual(empty.returncode, 0, empty.stderr)
+            self.assertEqual(unsupported.returncode, 0, unsupported.stderr)
+            self.assertEqual(no_result.returncode, 0, no_result.stderr)
+            self.assertEqual(json.loads(empty.stdout)["status"], "empty")
+            unsupported_response = json.loads(unsupported.stdout)
+            self.assertEqual(unsupported_response["status"], "unsupported")
+            self.assertEqual(
+                unsupported_response["interpretation"]["unsupported_terms"],
+                ["dragon", "sparkly"],
+            )
+            no_result_response = json.loads(no_result.stdout)
+            self.assertEqual(no_result_response["status"], "no_matches")
+            self.assertEqual(no_result_response["results"], [])
+            self.assertEqual(
+                no_result_response["unwanted_trait_filter"][
+                    "excluded_fragrance_edition_ids"
+                ],
+                [1, 2, 4],
+            )
+
     def test_exact_scent_match_records_versioned_384_number_embeddings(
         self,
     ) -> None:
@@ -1679,6 +1904,20 @@ class CatalogWorkflowTests(unittest.TestCase):
                 rows,
             )
             connection.commit()
+        finally:
+            connection.close()
+
+    def catalog_identity_counts(self, database: Path) -> dict[str, int]:
+        connection = sqlite3.connect(database)
+        try:
+            return {
+                "fragrances": connection.execute(
+                    "SELECT COUNT(*) FROM fragrances"
+                ).fetchone()[0],
+                "fragrance_editions": connection.execute(
+                    "SELECT COUNT(*) FROM fragrance_editions"
+                ).fetchone()[0],
+            }
         finally:
             connection.close()
 
