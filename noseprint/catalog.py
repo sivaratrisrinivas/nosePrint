@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -1282,7 +1283,13 @@ def _qdrant_health(args: argparse.Namespace) -> int:
     eligible_count = len(rows)
 
     qdrant_status: dict[str, Any]
-    if not index_path.exists():
+    if eligible_count == 0:
+        qdrant_status = {
+            "status": "not_applicable",
+            "path": str(index_path),
+            "message": "Import Real Catalog Scent Profiles into SQLite before building the Qdrant index.",
+        }
+    elif not index_path.exists():
         qdrant_status = {
             "status": "missing",
             "path": str(index_path),
@@ -1290,13 +1297,18 @@ def _qdrant_health(args: argparse.Namespace) -> int:
         }
     else:
         qdrant_status = _qdrant_index_freshness(index_path, rows)
+    sqlite_catalog = {
+        "status": "ok" if eligible_count else "empty",
+        "eligible_real_catalog_records": eligible_count,
+    }
+    if eligible_count == 0:
+        sqlite_catalog["message"] = (
+            "Import Real Catalog Scent Profiles into SQLite before serving shopper search."
+        )
     response = {
-        "status": qdrant_status["status"],
-        "sqlite_catalog": {
-            "status": "ok",
-            "eligible_real_catalog_records": eligible_count,
-        },
-        "embedding_runtime": {"status": "ok", **_embedding_metadata()},
+        "status": "empty_catalog" if eligible_count == 0 else qdrant_status["status"],
+        "sqlite_catalog": sqlite_catalog,
+        "embedding_runtime": _embedding_runtime_report(),
         "qdrant_index": qdrant_status,
         "rebuild_command": [
             sys.executable,
@@ -1309,6 +1321,11 @@ def _qdrant_health(args: argparse.Namespace) -> int:
             str(index_path),
         ],
     }
+    if eligible_count == 0:
+        response["next_actions"] = [
+            "Run the audit and import workflow to add Real Catalog Scent Profiles to SQLite.",
+            "Re-run qdrant-health after the Real Catalog import finishes.",
+        ]
     print(json.dumps(response, indent=2))
     return 0
 
@@ -1322,8 +1339,18 @@ def _qdrant_index_freshness(
             "path": str(index_path),
             "message": "Rebuild the Qdrant index from SQLite before serving ANN Scent Matches.",
         }
-    index_document = json.loads(index_path.read_text(encoding="utf-8"))
-    index_metadata = index_document["metadata"]
+    try:
+        index_document = json.loads(index_path.read_text(encoding="utf-8"))
+        index_metadata = index_document["metadata"]
+    except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
+        return {
+            "status": "unreadable",
+            "path": str(index_path),
+            "message": (
+                "Rebuild the Qdrant index from SQLite before serving ANN Scent Matches."
+            ),
+            "detail": str(error),
+        }
     expected_fingerprint = _catalog_fingerprint(
         [
             {
@@ -2167,8 +2194,53 @@ def _embedding_metadata() -> dict[str, Any]:
         "model_version": EMBEDDING_MODEL_VERSION,
         "pipeline_version": SERIALIZATION_PIPELINE_VERSION,
         "dimensions": EMBEDDING_DIMENSIONS,
-        "runtime_device": "cpu",
+        "runtime_device": _embedding_runtime_device(),
     }
+
+
+def _embedding_runtime_report() -> dict[str, Any]:
+    metadata = _embedding_metadata()
+    requested_device = _requested_embedding_device()
+    if requested_device == "cuda" and metadata["runtime_device"] == "cpu":
+        return {
+            "status": "fallback",
+            **metadata,
+            "requested_device": "cuda",
+            "message": "CUDA embedding runtime is unavailable; using the practical CPU fallback.",
+        }
+    if metadata["runtime_device"] == "cuda":
+        return {
+            "status": "accelerated",
+            **metadata,
+            "requested_device": requested_device,
+            "message": "CUDA embedding runtime is selected for local Scent Profile embeddings.",
+        }
+    return {"status": "ok", **metadata}
+
+
+def _embedding_runtime_device() -> str:
+    requested_device = _requested_embedding_device()
+    if requested_device == "cpu":
+        return "cpu"
+    if _cuda_embedding_supported():
+        return "cuda"
+    return "cpu"
+
+
+def _requested_embedding_device() -> str:
+    requested = os.environ.get("NOSEPRINT_EMBEDDING_DEVICE", "auto").strip().casefold()
+    if requested in {"cuda", "gpu"}:
+        return "cuda"
+    if requested == "cpu":
+        return "cpu"
+    return "auto"
+
+
+def _cuda_embedding_supported() -> bool:
+    supported = os.environ.get("NOSEPRINT_CUDA_SUPPORTED")
+    if supported is None:
+        return False
+    return supported.strip().casefold() in {"1", "true", "yes", "on"}
 
 
 def _embed_scent_profile(row: sqlite3.Row) -> list[float]:

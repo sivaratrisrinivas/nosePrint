@@ -271,8 +271,30 @@ The health response distinguishes:
 
 - `sqlite_catalog`: whether SQLite has eligible Real Catalog Scent Profiles
 - `embedding_runtime`: the configured model, model version, pipeline version,
-  dimensions, and CPU runtime fallback
-- `qdrant_index`: whether the index is `missing`, `fresh`, or `stale`
+  dimensions, selected runtime device, and CPU fallback status
+- `qdrant_index`: whether the index is `missing`, `fresh`, `stale`,
+  `unreadable`, or not yet applicable because the Real Catalog is empty
+
+The CLI is the local application surface; no public deployment, account system,
+or teaching-only mode is required. A healthy local startup has a non-empty
+SQLite Real Catalog, an embedding runtime status of `ok` or `accelerated`, and a
+fresh Qdrant-style index. If SQLite exists but has no eligible Real Catalog
+Scent Profiles, health returns `status: "empty_catalog"` and tells you to run
+the audit/import workflow before rebuilding the index.
+
+By default, NosePrint uses the practical CPU embedding path. On a target machine
+where the local embedding runtime supports a GTX 1050 Ti-class CUDA path, set:
+
+```bash
+NOSEPRINT_CUDA_SUPPORTED=1
+NOSEPRINT_EMBEDDING_DEVICE=auto
+```
+
+Health then reports `runtime_device: "cuda"` and `status: "accelerated"`. To
+force the CPU path, set `NOSEPRINT_EMBEDDING_DEVICE=cpu`. If CUDA is requested
+with `NOSEPRINT_EMBEDDING_DEVICE=cuda` but the runtime does not support it,
+health reports `status: "fallback"`, `requested_device: "cuda"`, and
+`runtime_device: "cpu"` so startup remains usable.
 
 If the index is missing or stale, rebuild it from SQLite:
 
@@ -292,6 +314,11 @@ Scale-Test Catalog records are not written to the normal shopping index. If
 SQLite catalog facts, the embedding model, the model version, the serialization
 pipeline, dimensions, or the index schema change, health reports the index as
 stale and tells the user to rebuild.
+
+If the index file is unreadable or malformed, shopper Scent Matches return
+`status: "index_unavailable"` with `qdrant_index.status: "unreadable"` and the
+same rebuild instruction. The broken index can be replaced from SQLite without
+deleting catalog data, because SQLite remains the source of truth.
 
 ## Find ANN Scent Matches
 

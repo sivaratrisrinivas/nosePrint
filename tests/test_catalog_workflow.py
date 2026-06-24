@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -838,6 +839,115 @@ class CatalogWorkflowTests(unittest.TestCase):
                 },
             )
 
+    def test_qdrant_health_distinguishes_empty_real_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.run_catalog(
+                "generate-scale-test-catalog",
+                "--database",
+                str(database),
+                "--records",
+                "2",
+                "--seed",
+                "1234",
+            )
+
+            health = self.run_catalog(
+                "qdrant-health",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            self.assertEqual(health.returncode, 0, health.stderr)
+            response = json.loads(health.stdout)
+            self.assertEqual(response["status"], "empty_catalog")
+            self.assertEqual(
+                response["sqlite_catalog"],
+                {
+                    "status": "empty",
+                    "eligible_real_catalog_records": 0,
+                    "message": "Import Real Catalog Scent Profiles into SQLite before serving shopper search.",
+                },
+            )
+            self.assertEqual(response["qdrant_index"]["status"], "not_applicable")
+            self.assertIn("import", response["next_actions"][0])
+
+    def test_qdrant_health_reports_clear_cpu_fallback_when_cuda_is_requested(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.create_browse_fixture(database)
+
+            health = self.run_catalog(
+                "qdrant-health",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                extra_env={
+                    "NOSEPRINT_EMBEDDING_DEVICE": "cuda",
+                    "NOSEPRINT_CUDA_SUPPORTED": "0",
+                },
+            )
+
+            self.assertEqual(health.returncode, 0, health.stderr)
+            self.assertEqual(
+                json.loads(health.stdout)["embedding_runtime"],
+                {
+                    "status": "fallback",
+                    "model": "noseprint-hash-embedding-384",
+                    "model_version": "1",
+                    "pipeline_version": "scent-profile-serialization-v1",
+                    "dimensions": 384,
+                    "requested_device": "cuda",
+                    "runtime_device": "cpu",
+                    "message": "CUDA embedding runtime is unavailable; using the practical CPU fallback.",
+                },
+            )
+
+    def test_qdrant_health_reports_cuda_when_embedding_runtime_supports_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            self.create_browse_fixture(database)
+
+            health = self.run_catalog(
+                "qdrant-health",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                extra_env={
+                    "NOSEPRINT_EMBEDDING_DEVICE": "auto",
+                    "NOSEPRINT_CUDA_SUPPORTED": "1",
+                },
+            )
+
+            self.assertEqual(health.returncode, 0, health.stderr)
+            self.assertEqual(
+                json.loads(health.stdout)["embedding_runtime"],
+                {
+                    "status": "accelerated",
+                    "model": "noseprint-hash-embedding-384",
+                    "model_version": "1",
+                    "pipeline_version": "scent-profile-serialization-v1",
+                    "dimensions": 384,
+                    "runtime_device": "cuda",
+                    "requested_device": "auto",
+                    "message": "CUDA embedding runtime is selected for local Scent Profile embeddings.",
+                },
+            )
+
     def test_rebuild_qdrant_index_writes_real_catalog_points_from_sqlite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory)
@@ -1074,6 +1184,31 @@ class CatalogWorkflowTests(unittest.TestCase):
             self.assertEqual(response["status"], "index_unavailable")
             self.assertEqual(response["qdrant_index"]["status"], "missing")
             self.assertIn("Rebuild", response["message"])
+
+    def test_scent_matches_explain_unreadable_qdrant_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "broken-qdrant-index.json"
+            self.create_browse_fixture(database)
+            index.write_text("{not valid json", encoding="utf-8")
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                "--edition-id",
+                "2",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            response = json.loads(matched.stdout)
+            self.assertEqual(response["status"], "index_unavailable")
+            self.assertEqual(response["qdrant_index"]["status"], "unreadable")
+            self.assertIn("Rebuild", response["message"])
+            self.assertNotIn("Traceback", matched.stderr)
 
     def test_reference_match_set_evaluates_exact_and_qdrant_recall(
         self,
@@ -2133,10 +2268,18 @@ class CatalogWorkflowTests(unittest.TestCase):
                 ],
             )
 
-    def run_catalog(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_catalog(
+        self,
+        *arguments: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [sys.executable, "-m", "noseprint.catalog", *arguments],
             cwd=ROOT,
+            env=env,
             text=True,
             capture_output=True,
             check=False,

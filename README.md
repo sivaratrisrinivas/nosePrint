@@ -53,12 +53,41 @@ Read the full [audit result](docs/audits/perfume-recommendation-dataset-v1.md).
 
 ## How
 
-NosePrint currently needs only Python 3; there are no extra packages to install.
-Run the test suite with:
+NosePrint currently needs only Python 3; there are no extra packages to install,
+no account system to configure, and no public deployment step. The local
+application starts through the Python CLI and uses SQLite plus rebuildable local
+JSON index files:
 
 ```bash
 python3 -m unittest discover -v
 ```
+
+Check local runtime health before serving ANN Scent Matches:
+
+```bash
+python3 -m noseprint.catalog qdrant-health \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json
+```
+
+Health reporting distinguishes the SQLite Real Catalog, the embedding runtime,
+and the Qdrant-style ANN index. If the database has no eligible Real Catalog
+Scent Profiles, health returns `empty_catalog` and points back to the audit and
+import workflow. If the index is missing, stale, or unreadable, the recovery path
+is to rebuild it from SQLite:
+
+```bash
+python3 -m noseprint.catalog rebuild-qdrant-index \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json
+```
+
+The embedding runtime defaults to the practical CPU path. On a local runtime
+that has CUDA support for a GTX 1050 Ti-class GPU, set
+`NOSEPRINT_CUDA_SUPPORTED=1` and leave `NOSEPRINT_EMBEDDING_DEVICE=auto` to let
+health report `runtime_device: "cuda"`. If CUDA is requested with
+`NOSEPRINT_EMBEDDING_DEVICE=cuda` but unavailable, health reports a clear CPU
+fallback instead of failing startup.
 
 The catalog workflow has thirteen commands:
 
@@ -279,8 +308,11 @@ shopping Scent Matches.
   facts; ambiguous terms are shown explicitly.
 - SQLite records versioned 384-number Scent Profile embeddings so future search
   indexes can be rebuilt without becoming the catalog source of truth.
+- Local runtime health distinguishes SQLite Real Catalog state, embedding
+  runtime state, and Qdrant-style ANN index state before serving ANN Scent
+  Matches.
 - The Qdrant-style ANN index is derived from SQLite, freshness-checked before
-  use, and safe to rebuild when missing, stale, or incompatible.
+  use, and safe to rebuild when missing, stale, unreadable, or incompatible.
 - Reference Match Set data is kept separate from Real Catalog imports,
   embeddings, training data, and user activity. Evaluation reports use it as an
   answer key without changing shopper catalog results.
@@ -298,8 +330,8 @@ owner. Product code should remain usable without reading those learning files.
 
 ## Direction
 
-The next project step is hardening local startup, health reporting, and recovery
-around the truthful SQLite Real Catalog, exact-cosine baseline, rebuildable ANN
-index, Reference Match Set evaluation, and isolated Scale-Test Catalog
-benchmark. The important rule remains the same: search can get faster and more
-useful, but catalog facts must stay traceable and honest.
+The local retrieval pipeline is now hardened around the truthful SQLite Real
+Catalog, exact-cosine baseline, rebuildable ANN index, Reference Match Set
+evaluation, and isolated Scale-Test Catalog benchmark. The important rule
+remains the same: search can get faster and more useful, but catalog facts must
+stay traceable and honest.
