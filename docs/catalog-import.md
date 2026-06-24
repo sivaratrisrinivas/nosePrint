@@ -321,3 +321,27 @@ The response includes `retrieval` metadata:
 If the index is missing, stale, or incompatible, the command returns
 `status: "index_unavailable"` and a rebuild message instead of returning
 possibly stale matches.
+
+## Evaluate a Reference Match Set
+
+Use a small, human-checked Reference Match Set to check whether exact cosine and
+Qdrant ANN retrieval return reasonable alternatives:
+
+```bash
+python3 -m noseprint.catalog evaluate-reference-matches \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json \
+  --reference-match-set data/reference-match-set-v1.json \
+  --limit 10
+```
+
+The command requires a fresh ANN index so exact cosine and ANN retrieval are
+evaluated against the same SQLite catalog state. The report includes top-k
+configuration, embedding model and pipeline versions, recall-at-k metrics,
+latency fields, per-reference hit ids, and inspectable weak or surprising
+Profile Comparisons.
+
+Reference Match Set JSON is evaluation data only. It is kept separate from Real
+Catalog source imports, Scent Profile embeddings, training data, and user
+activity. Running the evaluator does not create Fragrances or Fragrance
+Editions and does not change shopper browse results.

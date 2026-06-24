@@ -60,7 +60,7 @@ Run the test suite with:
 python3 -m unittest discover -v
 ```
 
-The catalog workflow has ten commands:
+The catalog workflow has eleven commands:
 
 1. `audit` checks a candidate Real Catalog source and writes a report.
 2. `import` accepts only the exact file that received a passing report, unless
@@ -77,7 +77,9 @@ The catalog workflow has ten commands:
 9. `qdrant-health` reports SQLite catalog, embedding runtime, and ANN index
    freshness state.
 10. `rebuild-qdrant-index` rebuilds the ANN index from SQLite Scent Profiles
-   without turning the index into the catalog source of truth.
+    without turning the index into the catalog source of truth.
+11. `evaluate-reference-matches` compares exact-cosine and Qdrant ANN retrieval
+    against a separate Reference Match Set answer key.
 
 See [how to run the catalog workflow](docs/catalog-import.md) for complete
 commands.
@@ -200,6 +202,24 @@ details and Profile Comparisons are hydrated from SQLite. The response also
 keeps exact cosine as the baseline and reports recall-at-k plus separate
 embedding, retrieval, and hydration latency fields.
 
+Evaluate retrieval quality with a small human-checked Reference Match Set:
+
+```bash
+python3 -m noseprint.catalog evaluate-reference-matches \
+  --database var/noseprint.sqlite3 \
+  --index var/qdrant-index.json \
+  --reference-match-set data/reference-match-set-v1.json \
+  --limit 10
+```
+
+This workflow reports exact-cosine and Qdrant ANN recall-at-k against the same
+catalog state, keeps model and search configuration visible, and includes
+factual Profile Comparisons for weak or surprising outcomes. Reference Match Set
+data is evaluation-only: it is not imported into the Real Catalog, used for
+training, inferred from user activity, or included in Scent Profile embeddings.
+See [Reference Match Set evaluation](docs/reference-match-set.md) for the
+documented answer-key format and report fields.
+
 ## Current Guarantees
 
 - Inconclusive catalog audits are blocked unless the owner explicitly accepts
@@ -235,6 +255,9 @@ embedding, retrieval, and hydration latency fields.
   indexes can be rebuilt without becoming the catalog source of truth.
 - The Qdrant-style ANN index is derived from SQLite, freshness-checked before
   use, and safe to rebuild when missing, stale, or incompatible.
+- Reference Match Set data is kept separate from Real Catalog imports,
+  embeddings, training data, and user activity. Evaluation reports use it as an
+  answer key without changing shopper catalog results.
 
 ## Learning Notes
 

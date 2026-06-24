@@ -1075,6 +1075,176 @@ class CatalogWorkflowTests(unittest.TestCase):
             self.assertEqual(response["qdrant_index"]["status"], "missing")
             self.assertIn("Rebuild", response["message"])
 
+    def test_reference_match_set_evaluates_exact_and_qdrant_recall(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            reference_match_set = workspace / "reference-match-set.json"
+            self.create_browse_fixture(database)
+            self.add_surprising_match_fixture(database)
+            reference_match_set.write_text(
+                json.dumps(
+                    {
+                        "id": "fixture-reference-match-set-v1",
+                        "description": "Human-checked fixture alternatives.",
+                        "purpose": "evaluation_only",
+                        "entries": [
+                            {
+                                "reference_fragrance_edition_id": 2,
+                                "reasonable_alternative_ids": [1, 5, 6],
+                                "note": "Rose alternatives checked for evaluation.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.run_catalog(
+                "rebuild-qdrant-index",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            evaluated = self.run_catalog(
+                "evaluate-reference-matches",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                "--reference-match-set",
+                str(reference_match_set),
+                "--limit",
+                "3",
+            )
+
+            self.assertEqual(evaluated.returncode, 0, evaluated.stderr)
+            report = json.loads(evaluated.stdout)
+            self.assertEqual(report["status"], "ok")
+            self.assertEqual(
+                report["reference_match_set"],
+                {
+                    "id": "fixture-reference-match-set-v1",
+                    "purpose": "evaluation_only",
+                    "entries": 1,
+                    "separation_notice": (
+                        "Reference Match Set data is evaluation-only; it is not "
+                        "training data, user activity, a Real Catalog source, or "
+                        "embedding input."
+                    ),
+                },
+            )
+            self.assertEqual(report["configuration"]["top_k"], 3)
+            self.assertEqual(
+                report["configuration"]["embedding"],
+                {
+                    "model": "noseprint-hash-embedding-384",
+                    "model_version": "1",
+                    "pipeline_version": "scent-profile-serialization-v1",
+                    "dimensions": 384,
+                    "runtime_device": "cpu",
+                },
+            )
+            self.assertEqual(report["configuration"]["exact"]["method"], "exact_cosine")
+            self.assertEqual(report["configuration"]["qdrant_ann"]["method"], "qdrant_ann")
+            self.assertEqual(report["configuration"]["qdrant_ann"]["index_status"], "fresh")
+            self.assertEqual(
+                report["metrics"],
+                {
+                    "exact_cosine": {
+                        "cases": 1,
+                        "expected_alternatives": 3,
+                        "retrieved_expected_alternatives": 3,
+                        "recall_at_k": 1.0,
+                        "latency_ms": 0,
+                    },
+                    "qdrant_ann": {
+                        "cases": 1,
+                        "expected_alternatives": 3,
+                        "retrieved_expected_alternatives": 3,
+                        "recall_at_k": 1.0,
+                        "latency_ms": 0,
+                    },
+                },
+            )
+            case = report["cases"][0]
+            self.assertEqual(case["reference_fragrance_edition_id"], 2)
+            self.assertEqual(case["expected_alternative_ids"], [1, 5, 6])
+            self.assertEqual(set(case["exact_cosine"]["hit_ids"]), {1, 5, 6})
+            self.assertEqual(set(case["qdrant_ann"]["hit_ids"]), {1, 5, 6})
+            self.assertIn(
+                "profile_comparison",
+                case["inspectable_outcomes"][0],
+            )
+            self.assertIn(
+                case["inspectable_outcomes"][0]["scent_match"]["strength_label"],
+                {"weak", "surprising"},
+            )
+            self.assertNotIn("Sample Rose Load Test", evaluated.stdout)
+
+    def test_reference_match_set_does_not_enter_catalog_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            reference_match_set = workspace / "reference-match-set.json"
+            self.create_browse_fixture(database)
+            before_counts = self.catalog_identity_counts(database)
+            reference_match_set.write_text(
+                json.dumps(
+                    {
+                        "id": "outside-catalog-reference-match-set-v1",
+                        "description": "Evaluation data with a non-catalog label.",
+                        "purpose": "evaluation_only",
+                        "entries": [
+                            {
+                                "reference_fragrance_edition_id": 2,
+                                "reasonable_alternative_ids": [1],
+                                "human_checked_label": "Never Catalog Rose",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            self.run_catalog(
+                "rebuild-qdrant-index",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+            )
+
+            evaluated = self.run_catalog(
+                "evaluate-reference-matches",
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                "--reference-match-set",
+                str(reference_match_set),
+                "--limit",
+                "1",
+            )
+            browsed = self.run_catalog(
+                "browse",
+                "--database",
+                str(database),
+                "--query",
+                "Never Catalog Rose",
+            )
+
+            self.assertEqual(evaluated.returncode, 0, evaluated.stderr)
+            self.assertEqual(browsed.returncode, 0, browsed.stderr)
+            self.assertEqual(self.catalog_identity_counts(database), before_counts)
+            browse_response = json.loads(browsed.stdout)
+            self.assertEqual(browse_response["status"], "no_matches")
+            self.assertEqual(browse_response["results"], [])
+
     def test_scent_match_labels_strong_and_surprising_profile_comparisons(
         self,
     ) -> None:
@@ -1902,6 +2072,39 @@ class CatalogWorkflowTests(unittest.TestCase):
                 VALUES (?, ?, ?)
                 """,
                 rows,
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def add_surprising_match_fixture(self, database: Path) -> None:
+        connection = sqlite3.connect(database)
+        try:
+            connection.executescript(
+                """
+                INSERT INTO fragrances (id, name, brand)
+                VALUES
+                    (3, 'Twin Rose', 'Fixture House'),
+                    (4, 'Shadow Rose', 'Fixture House');
+                INSERT INTO fragrance_editions
+                    (id, fragrance_id, name, concentration, catalog_kind)
+                VALUES
+                    (5, 3, 'Twin Rose EDP', 'EDP', 'real'),
+                    (6, 4, 'Shadow Rose EDP', 'EDP', 'real');
+                INSERT INTO scent_profiles
+                    (fragrance_edition_id, notes_json, main_accords_json,
+                     top_notes_json, middle_notes_json, base_notes_json, scent_family)
+                VALUES
+                    (5, '["rose", "oud"]', '["floral", "woody"]',
+                     '["pink pepper"]', '["rose"]', '["oud"]', 'floral'),
+                    (6, '["rose", "oud"]', '["floral", "woody"]',
+                     '["pink pepper"]', '["rose"]', '["oud"]', 'amber');
+                INSERT INTO source_records
+                    (dataset_id, source_row, fragrance_edition_id, original_values_json)
+                VALUES
+                    ('fixture-real-v1', 5, 5, '{"Brand": "Fixture House"}'),
+                    ('fixture-real-v1', 6, 6, '{"Brand": "Fixture House"}');
+                """
             )
             connection.commit()
         finally:

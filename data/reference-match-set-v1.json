@@ -1,0 +1,18 @@
+{
+  "id": "noseprint-reference-match-set-v1",
+  "description": "Small human-checked Reference Match Set for evaluating whether Scent Match retrieval returns reasonable alternatives. Edition ids must refer to the local Real Catalog database being evaluated.",
+  "purpose": "evaluation_only",
+  "separation": {
+    "not_training_data": true,
+    "not_user_activity": true,
+    "not_a_real_catalog_source": true,
+    "not_embedding_input": true
+  },
+  "entries": [
+    {
+      "reference_fragrance_edition_id": 2,
+      "reasonable_alternative_ids": [1],
+      "note": "Fixture-sized rose example: a deeper rose edition should retrieve the brighter rose edition as a reasonable alternative."
+    }
+  ]
+}

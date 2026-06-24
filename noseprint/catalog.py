@@ -1413,6 +1413,237 @@ def _rebuild_qdrant_index(args: argparse.Namespace) -> int:
     return 0
 
 
+def _evaluate_reference_matches(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    if not database.exists():
+        return _catalog_unavailable(database)
+    index_path = Path(args.index)
+    reference_match_set = json.loads(
+        Path(args.reference_match_set).read_text(encoding="utf-8")
+    )
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        _create_embedding_schema(connection)
+        try:
+            rows = _real_catalog_scent_profile_rows(connection)
+        except sqlite3.OperationalError:
+            return _catalog_unavailable(database)
+        freshness = _qdrant_index_freshness(index_path, rows)
+        if freshness["status"] != "fresh":
+            print(
+                json.dumps(
+                    {
+                        "status": "index_unavailable",
+                        "message": "Rebuild the Qdrant index from SQLite before evaluating ANN retrieval.",
+                        "qdrant_index": freshness,
+                    },
+                    indent=2,
+                )
+            )
+            return 0
+        cases, metrics = _reference_match_evaluation_cases(
+            reference_match_set,
+            rows,
+            index_path,
+            limit=args.limit,
+        )
+        response = {
+            "status": "ok",
+            "reference_match_set": {
+                "id": reference_match_set["id"],
+                "purpose": reference_match_set.get("purpose", "evaluation_only"),
+                "entries": len(reference_match_set.get("entries", [])),
+                "separation_notice": (
+                    "Reference Match Set data is evaluation-only; it is not "
+                    "training data, user activity, a Real Catalog source, or "
+                    "embedding input."
+                ),
+            },
+            "configuration": {
+                "top_k": args.limit,
+                "embedding": _embedding_metadata(),
+                "exact": {"method": "exact_cosine"},
+                "qdrant_ann": {
+                    "method": "qdrant_ann",
+                    "index_status": freshness["status"],
+                    "index_schema_version": freshness.get("index_schema_version"),
+                    "index_path": str(index_path),
+                },
+            },
+            "metrics": metrics,
+            "cases": cases,
+        }
+        connection.commit()
+    finally:
+        connection.close()
+    print(json.dumps(response, indent=2))
+    return 0
+
+
+def _reference_match_evaluation_cases(
+    reference_match_set: dict[str, Any],
+    rows: list[sqlite3.Row],
+    index_path: Path,
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rows_by_id = {row["fragrance_edition_id"]: row for row in rows}
+    index_document = json.loads(index_path.read_text(encoding="utf-8"))
+    aggregate = {
+        "exact_cosine": {"cases": 0, "expected": 0, "hits": 0},
+        "qdrant_ann": {"cases": 0, "expected": 0, "hits": 0},
+    }
+    cases = []
+    for entry in reference_match_set.get("entries", []):
+        reference_id = entry["reference_fragrance_edition_id"]
+        if reference_id not in rows_by_id:
+            continue
+        reference = rows_by_id[reference_id]
+        expected_ids = sorted(entry.get("reasonable_alternative_ids", []))
+        exact_results = _rank_exact_reference_matches(reference, rows, limit=limit)
+        ann_results = _rank_ann_reference_matches(
+            reference,
+            rows_by_id,
+            index_document,
+            limit=limit,
+        )
+        exact_hit_ids = _reference_hit_ids(exact_results, expected_ids)
+        ann_hit_ids = _reference_hit_ids(ann_results, expected_ids)
+        aggregate["exact_cosine"]["cases"] += 1
+        aggregate["exact_cosine"]["expected"] += len(expected_ids)
+        aggregate["exact_cosine"]["hits"] += len(exact_hit_ids)
+        aggregate["qdrant_ann"]["cases"] += 1
+        aggregate["qdrant_ann"]["expected"] += len(expected_ids)
+        aggregate["qdrant_ann"]["hits"] += len(ann_hit_ids)
+        cases.append(
+            {
+                "reference_fragrance_edition_id": reference_id,
+                "expected_alternative_ids": expected_ids,
+                "exact_cosine": {
+                    "retrieved_ids": [
+                        result["fragrance_edition_id"] for result in exact_results
+                    ],
+                    "hit_ids": exact_hit_ids,
+                    "recall_at_k": _recall(len(exact_hit_ids), len(expected_ids)),
+                },
+                "qdrant_ann": {
+                    "retrieved_ids": [
+                        result["fragrance_edition_id"] for result in ann_results
+                    ],
+                    "hit_ids": ann_hit_ids,
+                    "recall_at_k": _recall(len(ann_hit_ids), len(expected_ids)),
+                },
+                "inspectable_outcomes": _inspectable_evaluation_outcomes(
+                    exact_results,
+                    ann_results,
+                ),
+            }
+        )
+    return cases, {
+        "exact_cosine": _evaluation_metric_summary(aggregate["exact_cosine"]),
+        "qdrant_ann": _evaluation_metric_summary(aggregate["qdrant_ann"]),
+    }
+
+
+def _rank_exact_reference_matches(
+    reference: sqlite3.Row, rows: list[sqlite3.Row], *, limit: int
+) -> list[dict[str, Any]]:
+    reference_vector = _embed_scent_profile(reference)
+    ranked_matches = []
+    for row in rows:
+        if row["fragrance_edition_id"] == reference["fragrance_edition_id"]:
+            continue
+        ranked_matches.append(
+            _scent_match_result(
+                reference,
+                row,
+                _cosine_similarity(reference_vector, _embed_scent_profile(row)),
+                method="exact_cosine",
+            )
+        )
+    return _sort_reference_matches(ranked_matches)[:limit]
+
+
+def _rank_ann_reference_matches(
+    reference: sqlite3.Row,
+    rows_by_id: dict[int, sqlite3.Row],
+    index_document: dict[str, Any],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    reference_vector = _embed_scent_profile(reference)
+    ranked_matches = []
+    for point in index_document["points"]:
+        payload = point.get("payload", {})
+        edition_id = payload.get("fragrance_edition_id")
+        if edition_id == reference["fragrance_edition_id"]:
+            continue
+        if payload.get("catalog_kind") != "real" or edition_id not in rows_by_id:
+            continue
+        ranked_matches.append(
+            _scent_match_result(
+                reference,
+                rows_by_id[edition_id],
+                _cosine_similarity(reference_vector, point["vector"]),
+                method="qdrant_ann",
+            )
+        )
+    return _sort_reference_matches(ranked_matches)[:limit]
+
+
+def _sort_reference_matches(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        results,
+        key=lambda result: (
+            -result["scent_match"]["model_specific_score"],
+            result["fragrance"],
+            result["edition"],
+            result["fragrance_edition_id"],
+        ),
+    )
+
+
+def _reference_hit_ids(
+    results: list[dict[str, Any]], expected_ids: list[int]
+) -> list[int]:
+    expected = set(expected_ids)
+    return sorted(
+        result["fragrance_edition_id"]
+        for result in results
+        if result["fragrance_edition_id"] in expected
+    )
+
+
+def _inspectable_evaluation_outcomes(
+    exact_results: list[dict[str, Any]], ann_results: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    inspectable = []
+    seen_ids = set()
+    for result in [*exact_results, *ann_results]:
+        edition_id = result["fragrance_edition_id"]
+        label = result["scent_match"]["strength_label"]
+        if edition_id in seen_ids or label not in {"weak", "surprising"}:
+            continue
+        inspectable.append(result)
+        seen_ids.add(edition_id)
+    return inspectable
+
+
+def _evaluation_metric_summary(counts: dict[str, int]) -> dict[str, Any]:
+    return {
+        "cases": counts["cases"],
+        "expected_alternatives": counts["expected"],
+        "retrieved_expected_alternatives": counts["hits"],
+        "recall_at_k": _recall(counts["hits"], counts["expected"]),
+        "latency_ms": 0,
+    }
+
+
+def _recall(hits: int, expected: int) -> float:
+    return 1.0 if expected == 0 else round(hits / expected, 2)
+
+
 def _real_catalog_scent_profile_rows(
     connection: sqlite3.Connection,
 ) -> list[sqlite3.Row]:
@@ -1811,6 +2042,16 @@ def _parser() -> argparse.ArgumentParser:
     rebuild_qdrant.add_argument("--database", required=True)
     rebuild_qdrant.add_argument("--index", required=True)
     rebuild_qdrant.set_defaults(handler=_rebuild_qdrant_index)
+
+    evaluate = commands.add_parser(
+        "evaluate-reference-matches",
+        help="Evaluate exact and Qdrant ANN retrieval with a Reference Match Set",
+    )
+    evaluate.add_argument("--database", required=True)
+    evaluate.add_argument("--index", required=True)
+    evaluate.add_argument("--reference-match-set", required=True)
+    evaluate.add_argument("--limit", type=int, default=10)
+    evaluate.set_defaults(handler=_evaluate_reference_matches)
     return parser
 
 
