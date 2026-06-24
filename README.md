@@ -67,7 +67,8 @@ The catalog workflow has nine commands:
 5. `browse` searches Real Catalog Fragrance Editions by Fragrance name.
 6. `scent-profile` shows the selected Fragrance Edition's Scent Profile.
 7. `scent-matches` returns ranked exact-cosine Scent Matches from the Real
-   Catalog with calibrated labels and factual Profile Comparisons.
+   Catalog with calibrated labels, factual Profile Comparisons, and optional
+   Comparable Price filtering.
 8. `qdrant-health` reports SQLite catalog, embedding runtime, and ANN index
    freshness state.
 9. `rebuild-qdrant-index` rebuilds the ANN index from SQLite Scent Profiles
@@ -114,6 +115,22 @@ Each result includes a calibrated strength label, a model-specific exact-cosine
 score, and a factual Profile Comparison. Scale-Test Catalog rows are excluded
 from this shopper workflow.
 
+If curated Comparable Prices exist in SQLite, inspect dated United States USD
+snapshots alongside the same Scent Match results:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1 \
+  --limit 10 \
+  --show-prices
+```
+
+Use `--cheaper-only` to keep only alternatives with known same-size Comparable
+Prices below the selected Fragrance Edition. Price per millilitre is shown as a
+second check. Unknown prices remain `unknown`, and different bottle sizes do not
+support a strict cheaper claim.
+
 Build and check the ANN index before using the Qdrant retrieval path:
 
 ```bash
@@ -158,6 +175,9 @@ embedding, retrieval, and hydration latency fields.
 - Exact Scent Matches use Scent Profile facts only. Brand, price, bottle size,
   marketing copy, and Wear Profile facts do not alter the model-specific score
   or ranking.
+- Comparable Prices are dated United States USD snapshots stored in SQLite.
+  They can filter or annotate Scent Matches, but they do not change Scent Match
+  scores, labels, or Profile Comparisons.
 - Scent Match scores are model-specific exact-cosine scores, not probabilities,
   percent-identical claims, or promises about how someone will perceive a
   Fragrance Edition on skin.

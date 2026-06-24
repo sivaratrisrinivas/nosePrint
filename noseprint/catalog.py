@@ -330,6 +330,16 @@ def _create_schema(connection: sqlite3.Connection) -> None:
             runtime_device TEXT NOT NULL,
             vector_json TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS comparable_prices (
+            fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+            amount_usd REAL,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            market TEXT NOT NULL DEFAULT 'US',
+            bottle_size_ml REAL NOT NULL,
+            observed_on TEXT,
+            source_name TEXT,
+            source_url TEXT
+        );
         CREATE TABLE IF NOT EXISTS source_records (
             dataset_id TEXT NOT NULL REFERENCES catalog_sources(dataset_id),
             source_row INTEGER NOT NULL,
@@ -620,15 +630,19 @@ def _scent_matches(args: argparse.Namespace) -> int:
     connection.row_factory = sqlite3.Row
     try:
         _create_embedding_schema(connection)
+        _create_comparable_price_schema(connection)
         rows = connection.execute(
             """
             SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
                    fe.name AS edition, fe.concentration, fe.catalog_kind,
                    sp.notes_json, sp.main_accords_json, sp.top_notes_json,
-                   sp.middle_notes_json, sp.base_notes_json, sp.scent_family
+                   sp.middle_notes_json, sp.base_notes_json, sp.scent_family,
+                   cp.amount_usd, cp.currency, cp.market, cp.bottle_size_ml,
+                   cp.observed_on, cp.source_name, cp.source_url
             FROM fragrance_editions AS fe
             JOIN fragrances AS f ON f.id = fe.fragrance_id
             JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
+            LEFT JOIN comparable_prices AS cp ON cp.fragrance_edition_id = fe.id
             WHERE fe.catalog_kind = 'real'
             ORDER BY fe.id
             """
@@ -664,7 +678,13 @@ def _scent_matches(args: argparse.Namespace) -> int:
         _record_embedding(connection, row, candidate_vector)
         score = _cosine_similarity(reference_vector, candidate_vector)
         exact_ranked_matches.append(
-            _scent_match_result(reference, row, score, method="exact_cosine")
+            _scent_match_result(
+                reference,
+                row,
+                score,
+                method="exact_cosine",
+                include_price=args.cheaper_only or args.show_prices,
+            )
         )
     exact_ranked_matches.sort(
         key=lambda result: (
@@ -709,6 +729,7 @@ def _scent_matches(args: argparse.Namespace) -> int:
                     rows_by_id[edition_id],
                     score,
                     method="qdrant_ann",
+                    include_price=args.cheaper_only or args.show_prices,
                 )
             )
         ann_ranked_matches.sort(
@@ -739,6 +760,12 @@ def _scent_matches(args: argparse.Namespace) -> int:
     else:
         ranked_matches = exact_ranked_matches
 
+    if args.cheaper_only:
+        ranked_matches = [
+            result
+            for result in ranked_matches
+            if result.get("price_comparison", {}).get("strictly_cheaper") is True
+        ]
     limited_matches = ranked_matches[: args.limit]
     response: dict[str, Any] = {
         "status": "ok" if limited_matches else "no_matches",
@@ -753,10 +780,18 @@ def _scent_matches(args: argparse.Namespace) -> int:
     }
     if retrieval is not None:
         response["retrieval"] = retrieval
+    if args.cheaper_only or args.show_prices:
+        response["reference"]["comparable_price"] = _comparable_price(reference)
     if not limited_matches:
-        response["message"] = (
-            "No other Real Catalog Fragrance Editions are available for exact cosine Scent Matches."
-        )
+        if args.cheaper_only:
+            response["message"] = (
+                "No Real Catalog Scent Matches have known same-size Comparable Prices "
+                "below the selected Fragrance Edition."
+            )
+        else:
+            response["message"] = (
+                "No other Real Catalog Fragrance Editions are available for exact cosine Scent Matches."
+            )
     connection.commit()
     connection.close()
     print(json.dumps(response, indent=2))
@@ -764,7 +799,12 @@ def _scent_matches(args: argparse.Namespace) -> int:
 
 
 def _scent_match_result(
-    reference: sqlite3.Row, row: sqlite3.Row, score: float, *, method: str
+    reference: sqlite3.Row,
+    row: sqlite3.Row,
+    score: float,
+    *,
+    method: str,
+    include_price: bool = False,
 ) -> dict[str, Any]:
     if method == "exact_cosine":
         score_basis = (
@@ -777,7 +817,7 @@ def _scent_match_result(
             "with exact cosine retained as the correctness baseline; not a probability "
             "or percent-identical claim."
         )
-    return {
+    result = {
         "fragrance_edition_id": row["fragrance_edition_id"],
         "fragrance": row["fragrance"],
         "edition": row["edition"],
@@ -790,6 +830,72 @@ def _scent_match_result(
             "strength_label": _scent_match_strength(reference, row, score),
         },
         "profile_comparison": _profile_comparison(reference, row),
+    }
+    if include_price:
+        result["comparable_price"] = _comparable_price(row)
+        result["price_comparison"] = _price_comparison(reference, row)
+    return result
+
+
+def _comparable_price(row: sqlite3.Row) -> dict[str, Any]:
+    if (
+        row["amount_usd"] is None
+        or row["observed_on"] is None
+        or row["source_name"] is None
+        or row["source_url"] is None
+    ):
+        return {
+            "status": "unknown",
+            "message": "Comparable Price is unknown and has not been guessed.",
+        }
+    amount = float(row["amount_usd"])
+    bottle_size = float(row["bottle_size_ml"])
+    return {
+        "status": "known",
+        "amount_usd": amount,
+        "currency": row["currency"],
+        "market": row["market"],
+        "bottle_size_ml": bottle_size,
+        "price_per_ml_usd": round(amount / bottle_size, 2),
+        "observed_on": row["observed_on"],
+        "source": {
+            "name": row["source_name"],
+            "url": row["source_url"],
+        },
+        "snapshot_notice": (
+            "Dated United States USD Comparable Price snapshot; "
+            "not a live price or availability promise."
+        ),
+    }
+
+
+def _price_comparison(reference: sqlite3.Row, candidate: sqlite3.Row) -> dict[str, Any]:
+    reference_price = _comparable_price(reference)
+    candidate_price = _comparable_price(candidate)
+    if reference_price["status"] != "known" or candidate_price["status"] != "known":
+        return {
+            "cheaper_filter": "excluded",
+            "strictly_cheaper": False,
+            "basis": "unknown_price",
+            "message": "Unknown Comparable Prices cannot support a strict cheaper claim.",
+        }
+    same_size = (
+        reference_price["bottle_size_ml"] == candidate_price["bottle_size_ml"]
+    )
+    strictly_cheaper = (
+        same_size
+        and candidate_price["amount_usd"] < reference_price["amount_usd"]
+    )
+    return {
+        "cheaper_filter": "included" if strictly_cheaper else "excluded",
+        "strictly_cheaper": strictly_cheaper,
+        "basis": "same_bottle_size" if same_size else "different_bottle_size",
+        "reference_amount_usd": reference_price["amount_usd"],
+        "candidate_amount_usd": candidate_price["amount_usd"],
+        "reference_bottle_size_ml": reference_price["bottle_size_ml"],
+        "candidate_bottle_size_ml": candidate_price["bottle_size_ml"],
+        "reference_price_per_ml_usd": reference_price["price_per_ml_usd"],
+        "candidate_price_per_ml_usd": candidate_price["price_per_ml_usd"],
     }
 
 
@@ -992,6 +1098,23 @@ def _create_embedding_schema(connection: sqlite3.Connection) -> None:
             dimensions INTEGER NOT NULL,
             runtime_device TEXT NOT NULL,
             vector_json TEXT NOT NULL
+        )
+        """
+    )
+
+
+def _create_comparable_price_schema(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS comparable_prices (
+            fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+            amount_usd REAL,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            market TEXT NOT NULL DEFAULT 'US',
+            bottle_size_ml REAL NOT NULL,
+            observed_on TEXT,
+            source_name TEXT,
+            source_url TEXT
         )
         """
     )
@@ -1260,6 +1383,16 @@ def _parser() -> argparse.ArgumentParser:
     scent_matches.add_argument("--index")
     scent_matches.add_argument("--edition-id", required=True, type=int)
     scent_matches.add_argument("--limit", type=int, default=10)
+    scent_matches.add_argument(
+        "--show-prices",
+        action="store_true",
+        help="Include Comparable Price snapshots and cheaper-claim status without filtering matches",
+    )
+    scent_matches.add_argument(
+        "--cheaper-only",
+        action="store_true",
+        help="Return only Scent Matches with same-size known Comparable Prices below the reference price",
+    )
     scent_matches.set_defaults(handler=_scent_matches)
 
     qdrant_health = commands.add_parser(

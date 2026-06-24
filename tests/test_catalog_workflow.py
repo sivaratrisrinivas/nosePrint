@@ -212,6 +212,204 @@ class CatalogWorkflowTests(unittest.TestCase):
             )
             self.assertNotIn("Sample Rose Load Test", matched.stdout)
 
+    def test_cheaper_scent_matches_use_same_size_comparable_price_snapshots(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+            self.add_comparable_prices(
+                database,
+                [
+                    (
+                        1,
+                        100,
+                        80,
+                        "2026-06-01",
+                        "Fixture price sheet",
+                        "fixture://rose-edt",
+                    ),
+                    (
+                        2,
+                        100,
+                        110,
+                        "2026-06-01",
+                        "Fixture price sheet",
+                        "fixture://rose-edp",
+                    ),
+                    (4, 100, None, None, None, None),
+                ],
+            )
+
+            matched = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+                "--limit",
+                "3",
+                "--cheaper-only",
+            )
+
+            self.assertEqual(matched.returncode, 0, matched.stderr)
+            response = json.loads(matched.stdout)
+            self.assertEqual(response["status"], "ok")
+            self.assertEqual(
+                response["reference"]["comparable_price"],
+                {
+                    "status": "known",
+                    "amount_usd": 110.0,
+                    "currency": "USD",
+                    "market": "US",
+                    "bottle_size_ml": 100.0,
+                    "price_per_ml_usd": 1.1,
+                    "observed_on": "2026-06-01",
+                    "source": {
+                        "name": "Fixture price sheet",
+                        "url": "fixture://rose-edp",
+                    },
+                    "snapshot_notice": "Dated United States USD Comparable Price snapshot; not a live price or availability promise.",
+                },
+            )
+            self.assertEqual(
+                [result["fragrance_edition_id"] for result in response["results"]],
+                [1],
+            )
+            self.assertEqual(
+                response["results"][0]["comparable_price"],
+                {
+                    "status": "known",
+                    "amount_usd": 80.0,
+                    "currency": "USD",
+                    "market": "US",
+                    "bottle_size_ml": 100.0,
+                    "price_per_ml_usd": 0.8,
+                    "observed_on": "2026-06-01",
+                    "source": {
+                        "name": "Fixture price sheet",
+                        "url": "fixture://rose-edt",
+                    },
+                    "snapshot_notice": "Dated United States USD Comparable Price snapshot; not a live price or availability promise.",
+                },
+            )
+            self.assertEqual(
+                response["results"][0]["price_comparison"],
+                {
+                    "cheaper_filter": "included",
+                    "strictly_cheaper": True,
+                    "basis": "same_bottle_size",
+                    "reference_amount_usd": 110.0,
+                    "candidate_amount_usd": 80.0,
+                    "reference_bottle_size_ml": 100.0,
+                    "candidate_bottle_size_ml": 100.0,
+                    "reference_price_per_ml_usd": 1.1,
+                    "candidate_price_per_ml_usd": 0.8,
+                },
+            )
+            self.assertEqual(
+                response["results"][0]["scent_match"],
+                {
+                    "method": "exact_cosine",
+                    "model_specific_score": 0.5,
+                    "score_basis": "Exact cosine over NosePrint Scent Profile embeddings; not a probability or percent-identical claim.",
+                    "strength_label": "weak",
+                },
+            )
+            self.assertNotIn("Sample Rose Load Test", matched.stdout)
+
+    def test_priced_scent_matches_show_unequal_and_unknown_prices_without_cheaper_claims(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+            self.add_comparable_prices(
+                database,
+                [
+                    (
+                        1,
+                        50,
+                        60,
+                        "2026-06-01",
+                        "Fixture price sheet",
+                        "fixture://rose-edt-50",
+                    ),
+                    (
+                        2,
+                        100,
+                        110,
+                        "2026-06-01",
+                        "Fixture price sheet",
+                        "fixture://rose-edp-100",
+                    ),
+                    (4, 100, None, None, None, None),
+                ],
+            )
+
+            unpriced = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+                "--limit",
+                "3",
+            )
+            priced = self.run_catalog(
+                "scent-matches",
+                "--database",
+                str(database),
+                "--edition-id",
+                "2",
+                "--limit",
+                "3",
+                "--show-prices",
+            )
+
+            self.assertEqual(unpriced.returncode, 0, unpriced.stderr)
+            self.assertEqual(priced.returncode, 0, priced.stderr)
+            unpriced_results = json.loads(unpriced.stdout)["results"]
+            priced_results = json.loads(priced.stdout)["results"]
+            self.assertEqual(
+                [result["fragrance_edition_id"] for result in priced_results],
+                [1, 4],
+            )
+            self.assertEqual(
+                [result["scent_match"] for result in priced_results],
+                [result["scent_match"] for result in unpriced_results],
+            )
+            self.assertEqual(
+                priced_results[0]["price_comparison"],
+                {
+                    "cheaper_filter": "excluded",
+                    "strictly_cheaper": False,
+                    "basis": "different_bottle_size",
+                    "reference_amount_usd": 110.0,
+                    "candidate_amount_usd": 60.0,
+                    "reference_bottle_size_ml": 100.0,
+                    "candidate_bottle_size_ml": 50.0,
+                    "reference_price_per_ml_usd": 1.1,
+                    "candidate_price_per_ml_usd": 1.2,
+                },
+            )
+            self.assertEqual(
+                priced_results[1]["comparable_price"],
+                {
+                    "status": "unknown",
+                    "message": "Comparable Price is unknown and has not been guessed.",
+                },
+            )
+            self.assertEqual(
+                priced_results[1]["price_comparison"],
+                {
+                    "cheaper_filter": "excluded",
+                    "strictly_cheaper": False,
+                    "basis": "unknown_price",
+                    "message": "Unknown Comparable Prices cannot support a strict cheaper claim.",
+                },
+            )
+
     def test_exact_scent_match_records_versioned_384_number_embeddings(
         self,
     ) -> None:
@@ -1303,6 +1501,40 @@ class CatalogWorkflowTests(unittest.TestCase):
                     ('fixture-real-v1', 4, 4,
                      '{"Brand": "Fixture House", "Description": "Sparse iris copy.", "Price": "", "Bottle Size": ""}');
                 """
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+    def add_comparable_prices(
+        self,
+        database: Path,
+        rows: list[tuple[int, float, float | None, str | None, str | None, str | None]],
+    ) -> None:
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute(
+                """
+                CREATE TABLE comparable_prices (
+                    fragrance_edition_id INTEGER PRIMARY KEY REFERENCES fragrance_editions(id),
+                    amount_usd REAL,
+                    currency TEXT NOT NULL DEFAULT 'USD',
+                    market TEXT NOT NULL DEFAULT 'US',
+                    bottle_size_ml REAL NOT NULL,
+                    observed_on TEXT,
+                    source_name TEXT,
+                    source_url TEXT
+                )
+                """
+            )
+            connection.executemany(
+                """
+                INSERT INTO comparable_prices
+                    (fragrance_edition_id, bottle_size_ml, amount_usd,
+                     observed_on, source_name, source_url)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                rows,
             )
             connection.commit()
         finally:

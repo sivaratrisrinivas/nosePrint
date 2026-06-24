@@ -129,6 +129,40 @@ The generated 384-number embeddings are recorded in SQLite with their model and
 pipeline versions. Later search indexes can be rebuilt from these catalog-owned
 facts instead of becoming a second source of truth.
 
+## Inspect and filter by Comparable Prices
+
+Comparable Prices are curated SQLite facts attached to Fragrance Editions. Each
+known snapshot stores the United States USD amount, bottle size in millilitres,
+observation date, and source metadata. They are dated reference information, not
+live retailer prices or availability promises.
+
+Show price snapshots without filtering Scent Matches:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1 \
+  --limit 10 \
+  --show-prices
+```
+
+Return only alternatives with known same-size Comparable Prices below the
+selected Fragrance Edition:
+
+```bash
+python3 -m noseprint.catalog scent-matches \
+  --database var/noseprint.sqlite3 \
+  --edition-id 1 \
+  --limit 10 \
+  --cheaper-only
+```
+
+The response keeps the original Scent Match score and label unchanged. Price
+metadata appears separately as `comparable_price` and `price_comparison`.
+Different bottle sizes show price per millilitre for inspection but are not
+treated as strict cheaper claims. Missing prices are displayed as `unknown` and
+are not guessed.
+
 ## Check and rebuild the Qdrant ANN index
 
 The ANN index is a rebuildable helper derived from SQLite. It stores stable
