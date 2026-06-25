@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import parse_qs, urlparse
@@ -58,6 +59,7 @@ TIDYTUESDAY_PARFUMO_SCHEMA = [
 TIDYTUESDAY_PARFUMO_DATASET_ID = "tidytuesday-parfumo-2024-12-10"
 DEFAULT_APP_DATABASE = Path("var/noseprint.sqlite3")
 DEFAULT_APP_INDEX = Path("var/qdrant-index.json")
+APP_STDOUT_LOCK = threading.Lock()
 
 
 def _sha256(path: Path) -> str:
@@ -990,29 +992,63 @@ def _catalog_unavailable(database: Path) -> int:
 
 
 def _browse(args: argparse.Namespace) -> int:
+    try:
+        print(json.dumps(_browse_response(args), indent=2))
+    except ValueError as error:
+        if str(error).startswith("Catalog unavailable:"):
+            return _catalog_unavailable(Path(args.database))
+        raise
+    return 0
+
+
+def _browse_response(args: argparse.Namespace) -> dict[str, Any]:
     query = args.query.strip()
     database = Path(args.database)
     if not database.exists():
-        return _catalog_unavailable(database)
+        raise ValueError(
+            "Catalog unavailable: import a Real Catalog into SQLite first."
+        )
+    per_page = getattr(args, "per_page", None)
+    page = getattr(args, "page", 1)
+    if per_page is not None:
+        if per_page < 1:
+            raise ValueError("--per-page must be at least 1")
+        if page < 1:
+            raise ValueError("--page must be at least 1")
     connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
     try:
         try:
-            rows = connection.execute(
+            total = connection.execute(
                 """
-                SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
-                       fe.name AS edition, fe.concentration
+                SELECT COUNT(*)
                 FROM fragrance_editions AS fe
                 JOIN fragrances AS f ON f.id = fe.fragrance_id
                 JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
                 WHERE fe.catalog_kind = 'real'
                   AND f.name LIKE ? COLLATE NOCASE
-                ORDER BY f.name, fe.id
                 """,
                 (f"%{query}%",),
-            ).fetchall()
+            ).fetchone()[0]
+            sql = """
+            SELECT fe.id AS fragrance_edition_id, f.name AS fragrance,
+                   fe.name AS edition, fe.concentration
+            FROM fragrance_editions AS fe
+            JOIN fragrances AS f ON f.id = fe.fragrance_id
+            JOIN scent_profiles AS sp ON sp.fragrance_edition_id = fe.id
+            WHERE fe.catalog_kind = 'real'
+              AND f.name LIKE ? COLLATE NOCASE
+            ORDER BY f.name, fe.id
+            """
+            parameters: list[Any] = [f"%{query}%"]
+            if per_page is not None:
+                sql += "\nLIMIT ? OFFSET ?"
+                parameters.extend([per_page, (page - 1) * per_page])
+            rows = connection.execute(sql, parameters).fetchall()
         except sqlite3.OperationalError:
-            return _catalog_unavailable(database)
+            raise ValueError(
+                "Catalog unavailable: import a Real Catalog into SQLite first."
+            )
     finally:
         connection.close()
     results = [dict(row) for row in rows]
@@ -1020,13 +1056,21 @@ def _browse(args: argparse.Namespace) -> int:
         "status": "ok" if results else "no_matches",
         "query": query,
     }
+    if per_page is not None:
+        response["pagination"] = {
+            "page": page,
+            "per_page": per_page,
+            "total_results": total,
+            "total_pages": max(1, math.ceil(total / per_page)),
+            "has_previous": page > 1,
+            "has_next": page * per_page < total,
+        }
     if not results:
         response["message"] = (
             "No Real Catalog Fragrance Editions matched that Fragrance name."
         )
     response["results"] = results
-    print(json.dumps(response, indent=2))
-    return 0
+    return response
 
 
 def _json_or_unknown(value: str | None) -> list[str] | str:
@@ -1041,9 +1085,21 @@ def _value_or_unknown(value: str | None) -> str:
 
 
 def _scent_profile(args: argparse.Namespace) -> int:
+    try:
+        print(json.dumps(_scent_profile_response(args), indent=2))
+    except ValueError as error:
+        if str(error).startswith("Catalog unavailable:"):
+            return _catalog_unavailable(Path(args.database))
+        raise
+    return 0
+
+
+def _scent_profile_response(args: argparse.Namespace) -> dict[str, Any]:
     database = Path(args.database)
     if not database.exists():
-        return _catalog_unavailable(database)
+        raise ValueError(
+            "Catalog unavailable: import a Real Catalog into SQLite first."
+        )
     connection = sqlite3.connect(database)
     connection.row_factory = sqlite3.Row
     try:
@@ -1063,42 +1119,32 @@ def _scent_profile(args: argparse.Namespace) -> int:
                 (args.edition_id,),
             ).fetchone()
         except sqlite3.OperationalError:
-            return _catalog_unavailable(database)
+            raise ValueError(
+                "Catalog unavailable: import a Real Catalog into SQLite first."
+            )
     finally:
         connection.close()
     if row is None:
-        print(
-            json.dumps(
-                {
-                    "status": "not_found",
-                    "message": "No Real Catalog Fragrance Edition is available for that edition id.",
-                },
-                indent=2,
-            )
-        )
-        return 0
-    print(
-        json.dumps(
-            {
-                "status": "ok",
-                "fragrance_edition_id": row["fragrance_edition_id"],
-                "fragrance": row["fragrance"],
-                "edition": row["edition"],
-                "concentration": row["concentration"],
-                "scent_profile": {
-                    "main_accords": _json_or_unknown(row["main_accords_json"]),
-                    "note_pyramid": {
-                        "top": _json_or_unknown(row["top_notes_json"]),
-                        "middle": _json_or_unknown(row["middle_notes_json"]),
-                        "base": _json_or_unknown(row["base_notes_json"]),
-                    },
-                    "scent_family": _value_or_unknown(row["scent_family"]),
-                },
+        return {
+            "status": "not_found",
+            "message": "No Real Catalog Fragrance Edition is available for that edition id.",
+        }
+    return {
+        "status": "ok",
+        "fragrance_edition_id": row["fragrance_edition_id"],
+        "fragrance": row["fragrance"],
+        "edition": row["edition"],
+        "concentration": row["concentration"],
+        "scent_profile": {
+            "main_accords": _json_or_unknown(row["main_accords_json"]),
+            "note_pyramid": {
+                "top": _json_or_unknown(row["top_notes_json"]),
+                "middle": _json_or_unknown(row["middle_notes_json"]),
+                "base": _json_or_unknown(row["base_notes_json"]),
             },
-            indent=2,
-        )
-    )
-    return 0
+            "scent_family": _value_or_unknown(row["scent_family"]),
+        },
+    }
 
 
 def _scent_matches(args: argparse.Namespace) -> int:
@@ -2401,9 +2447,13 @@ APP_HTML = """<!doctype html>
     section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
     label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
     .search-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    .pager { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; }
+    .pager-status { color: var(--muted); font-size: 12px; }
     input, button { min-height: 40px; border-radius: 6px; border: 1px solid var(--line); font: inherit; }
     input { width: 100%; padding: 0 10px; background: #fff; color: var(--text); }
     button { padding: 0 12px; background: var(--accent); color: white; border-color: var(--accent); cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.45; }
+    button.secondary { background: #fff; color: var(--accent-strong); border-color: var(--line); }
     button:focus, input:focus { outline: 3px solid rgba(47, 111, 104, 0.25); outline-offset: 2px; }
     .list { display: grid; gap: 8px; margin-top: 14px; }
     .result { width: 100%; display: block; text-align: left; background: #fff; color: var(--text); border-color: var(--line); padding: 10px; min-height: 0; }
@@ -2446,6 +2496,11 @@ APP_HTML = """<!doctype html>
           </div>
         </form>
         <div class="list" id="results" role="list"></div>
+        <div class="pager" id="pager" hidden>
+          <button class="secondary" id="previous-page" type="button">Previous</button>
+          <div class="pager-status" id="pager-status"></div>
+          <button class="secondary" id="next-page" type="button">Next</button>
+        </div>
       </section>
       <section aria-labelledby="profile-title">
         <h2 id="profile-title">Selected Fragrance Edition</h2>
@@ -2459,6 +2514,12 @@ APP_HTML = """<!doctype html>
     const profileEl = document.querySelector("#profile");
     const form = document.querySelector("#search-form");
     const queryInput = document.querySelector("#query");
+    const pagerEl = document.querySelector("#pager");
+    const pagerStatusEl = document.querySelector("#pager-status");
+    const previousPageButton = document.querySelector("#previous-page");
+    const nextPageButton = document.querySelector("#next-page");
+    let currentPage = 1;
+    const perPage = 10;
 
     function escapeHtml(value) {
       return String(value ?? "").replace(/[&<>"']/g, character => ({
@@ -2486,12 +2547,16 @@ APP_HTML = """<!doctype html>
       statusEl.textContent = `${data.real_catalog_records.toLocaleString()} Real Catalog records`;
     }
 
-    async function search(query) {
+    async function search(query, page = 1) {
+      currentPage = page;
       resultsEl.innerHTML = `<div class="empty">Searching...</div>`;
-      const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+      pagerEl.hidden = true;
+      const response = await fetch(`/api/search?q=${encodeURIComponent(query)}&page=${page}&per_page=${perPage}`);
       const data = await response.json();
       if (!data.results.length) {
         resultsEl.innerHTML = `<div class="empty">No matches.</div>`;
+        profileEl.innerHTML = `<div class="empty">Choose a search result to inspect its Scent Profile.</div>`;
+        renderPager(data.pagination);
         return;
       }
       resultsEl.innerHTML = data.results.map(result => `
@@ -2503,17 +2568,27 @@ APP_HTML = """<!doctype html>
       resultsEl.querySelectorAll("button").forEach(button => {
         button.addEventListener("click", () => loadProfile(button.dataset.id));
       });
+      renderPager(data.pagination);
       await loadProfile(data.results[0].fragrance_edition_id);
+    }
+
+    function renderPager(pagination) {
+      if (!pagination) {
+        pagerEl.hidden = true;
+        return;
+      }
+      pagerEl.hidden = false;
+      const start = pagination.total_results ? ((pagination.page - 1) * pagination.per_page) + 1 : 0;
+      const end = Math.min(pagination.page * pagination.per_page, pagination.total_results);
+      pagerStatusEl.textContent = `${start}-${end} of ${pagination.total_results}`;
+      previousPageButton.disabled = !pagination.has_previous;
+      nextPageButton.disabled = !pagination.has_next;
     }
 
     async function loadProfile(id) {
       profileEl.innerHTML = `<div class="empty">Loading Scent Profile...</div>`;
-      const [profileResponse, matchesResponse] = await Promise.all([
-        fetch(`/api/profile?id=${encodeURIComponent(id)}`),
-        fetch(`/api/matches?id=${encodeURIComponent(id)}&limit=5`)
-      ]);
+      const profileResponse = await fetch(`/api/profile?id=${encodeURIComponent(id)}`);
       const profile = await profileResponse.json();
-      const matches = await matchesResponse.json();
       if (profile.status !== "ok") {
         profileEl.innerHTML = `<div class="empty warning">Fragrance Edition not found.</div>`;
         return;
@@ -2534,26 +2609,48 @@ APP_HTML = """<!doctype html>
           </div>
           <div>
             <h2>Scent Matches</h2>
-            <div class="matches">
-              ${(matches.results || []).map(match => `
-                <div class="match">
-                  <strong>${escapeHtml(match.edition)}</strong>
-                  <div class="meta">${escapeHtml(match.fragrance)}${match.concentration ? " &middot; " + escapeHtml(match.concentration) : ""}</div>
-                  <div class="score">${escapeHtml(match.scent_match.strength_label)} &middot; ${escapeHtml(match.scent_match.model_specific_score)}</div>
-                </div>
-              `).join("") || `<div class="empty">No matches yet.</div>`}
-            </div>
+            <div class="matches" id="matches"><div class="empty">Loading matches...</div></div>
           </div>
         </div>
       `;
+      await loadMatches(id);
+    }
+
+    async function loadMatches(id) {
+      const matchesEl = document.querySelector("#matches");
+      if (!matchesEl) return;
+      try {
+        const matchesResponse = await fetch(`/api/matches?id=${encodeURIComponent(id)}&limit=5`);
+        const matches = await matchesResponse.json();
+        if (matches.status === "error") {
+          matchesEl.innerHTML = `<div class="empty warning">Scent Matches are unavailable right now.</div>`;
+          return;
+        }
+        matchesEl.innerHTML = (matches.results || []).map(match => `
+          <div class="match">
+            <strong>${escapeHtml(match.edition)}</strong>
+            <div class="meta">${escapeHtml(match.fragrance)}${match.concentration ? " &middot; " + escapeHtml(match.concentration) : ""}</div>
+            <div class="score">${escapeHtml(match.scent_match.strength_label)} &middot; ${escapeHtml(match.scent_match.model_specific_score)}</div>
+          </div>
+        `).join("") || `<div class="empty">No matches yet.</div>`;
+      } catch (error) {
+        matchesEl.innerHTML = `<div class="empty warning">Scent Matches are unavailable right now.</div>`;
+      }
     }
 
     form.addEventListener("submit", event => {
       event.preventDefault();
-      search(queryInput.value.trim());
+      search(queryInput.value.trim(), 1);
     });
 
-    loadStatus().then(() => search(queryInput.value));
+    previousPageButton.addEventListener("click", () => {
+      if (currentPage > 1) search(queryInput.value.trim(), currentPage - 1);
+    });
+    nextPageButton.addEventListener("click", () => {
+      search(queryInput.value.trim(), currentPage + 1);
+    });
+
+    loadStatus().then(() => search(queryInput.value, 1));
   </script>
 </body>
 </html>
@@ -2562,8 +2659,9 @@ APP_HTML = """<!doctype html>
 
 def _json_response_from_handler(handler: Any, args: argparse.Namespace) -> dict[str, Any]:
     output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        exit_code = handler(args)
+    with APP_STDOUT_LOCK:
+        with contextlib.redirect_stdout(output):
+            exit_code = handler(args)
     if exit_code != 0:
         return {"status": "error", "message": output.getvalue().strip()}
     return json.loads(output.getvalue())
@@ -2595,22 +2693,22 @@ def _make_app_handler(database: Path, index: Path) -> type[BaseHTTPRequestHandle
                     self._send_json(_app_status(database))
                 elif parsed.path == "/api/search":
                     self._send_json(
-                        _json_response_from_handler(
-                            _browse,
+                        _browse_response(
                             argparse.Namespace(
                                 database=str(database),
                                 query=query.get("q", [""])[0],
-                            ),
+                                page=int(query.get("page", ["1"])[0]),
+                                per_page=int(query.get("per_page", ["10"])[0]),
+                            )
                         )
                     )
                 elif parsed.path == "/api/profile":
                     self._send_json(
-                        _json_response_from_handler(
-                            _scent_profile,
+                        _scent_profile_response(
                             argparse.Namespace(
                                 database=str(database),
                                 edition_id=int(query.get("id", ["0"])[0]),
-                            ),
+                            )
                         )
                     )
                 elif parsed.path == "/api/matches":
@@ -3530,6 +3628,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     browse.add_argument("--database", required=True)
     browse.add_argument("--query", required=True)
+    browse.add_argument("--page", type=int, default=1)
+    browse.add_argument("--per-page", type=int)
     browse.set_defaults(handler=_browse)
 
     scent_profile = commands.add_parser(

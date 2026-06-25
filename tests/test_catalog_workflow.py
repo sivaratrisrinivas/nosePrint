@@ -408,6 +408,50 @@ class CatalogWorkflowTests(unittest.TestCase):
                 },
             )
 
+    def test_shopper_searches_real_catalog_with_pagination(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            database = Path(temporary_directory) / "catalog.sqlite3"
+            self.create_browse_fixture(database)
+
+            searched = self.run_catalog(
+                "browse",
+                "--database",
+                str(database),
+                "--query",
+                "sample rose",
+                "--page",
+                "2",
+                "--per-page",
+                "1",
+            )
+
+            self.assertEqual(searched.returncode, 0, searched.stderr)
+            self.assertEqual(
+                json.loads(searched.stdout),
+                {
+                    "status": "ok",
+                    "query": "sample rose",
+                    "pagination": {
+                        "page": 2,
+                        "per_page": 1,
+                        "total_results": 2,
+                        "total_pages": 2,
+                        "has_previous": True,
+                        "has_next": False,
+                    },
+                    "results": [
+                        {
+                            "fragrance_edition_id": 2,
+                            "fragrance": "Sample Rose",
+                            "edition": "Sample Rose EDP",
+                            "concentration": "EDP",
+                        },
+                    ],
+                },
+            )
+
     def test_shopper_selects_fragrance_edition_and_inspects_scent_profile(
         self,
     ) -> None:
