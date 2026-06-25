@@ -44,6 +44,10 @@ _Avoid_: AI reasoning, match explanation
 The collection of real Fragrance Editions whose source and reuse status have been checked. Only this catalog may appear as real shopping inventory.
 _Avoid_: Production dataset, benchmark data
 
+**Curated Batch**:
+A small group of Fragrance Editions prepared and reviewed together before import into the Real Catalog. Draft batches may be messy, but a committed batch should be reviewed, source-traceable, and useful for Scent Matches.
+_Avoid_: Spreadsheet, import dump
+
 **Scale-Test Catalog**:
 A clearly labeled collection of generated Fragrance Editions used only to measure vector-search speed and accuracy at larger sizes. Its records must never appear as real or purchasable products.
 _Avoid_: Real Catalog, shopping inventory

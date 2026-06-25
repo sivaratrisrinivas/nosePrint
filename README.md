@@ -9,6 +9,7 @@ find nearby Fragrance Editions using clear scent facts.
 NosePrint is a small Python command-line app backed by SQLite. It can:
 
 - audit and import fragrance data into a Real Catalog;
+- prepare and preview source-traceable Curated Batch CSV files before import;
 - browse Fragrance Editions by name;
 - show the Scent Profile for a selected Fragrance Edition;
 - find Scent Matches from either a selected Fragrance Edition or a beginner
@@ -53,6 +54,8 @@ Read the full [audit result](docs/audits/perfume-recommendation-dataset-v1.md).
 For a better shopper-facing seed dataset, use the
 [curated Real Catalog strategy](docs/curated-real-catalog.md): manually reviewed
 rows from permitted sources, with source URLs and rich Scent Profile facts.
+Curated Batch drafts can be generated with `curated-template` and checked with
+`curated-preview` before any reviewed rows are imported.
 
 ## How
 
@@ -114,29 +117,33 @@ CUDA is requested but unavailable, health reports a clear CPU fallback.
 - **Safe rebuilds**: the index can be deleted or regenerated because SQLite owns
   the catalog facts.
 
-The catalog workflow has thirteen commands:
+The catalog workflow has fifteen commands:
 
 1. `audit` checks a candidate Real Catalog source and writes a report.
 2. `import` accepts only the exact file that received a passing report, unless
    the owner explicitly accepts an inconclusive risk.
-3. `inspect` shows accepted Real Catalog records and where they came from.
-4. `inspect-quarantine` shows rows kept out of the catalog and explains why.
-5. `browse` searches Real Catalog Fragrance Editions by Fragrance name.
-6. `scent-profile` shows the selected Fragrance Edition's Scent Profile.
-7. `scent-matches` returns ranked exact-cosine Scent Matches from the Real
+3. `curated-template` prints the Curated Batch CSV columns for reviewed Real
+   Catalog preparation.
+4. `curated-preview` reads a draft Curated Batch CSV without importing it and
+   reports readiness, review gaps, duplicates, Batch 1 quality, and coverage.
+5. `inspect` shows accepted Real Catalog records and where they came from.
+6. `inspect-quarantine` shows rows kept out of the catalog and explains why.
+7. `browse` searches Real Catalog Fragrance Editions by Fragrance name.
+8. `scent-profile` shows the selected Fragrance Edition's Scent Profile.
+9. `scent-matches` returns ranked exact-cosine Scent Matches from the Real
    Catalog with calibrated labels, factual Profile Comparisons, and optional
    Comparable Price and Wear Profile filtering.
-8. `scent-request` interprets beginner wanted and unwanted scent traits before
+10. `scent-request` interprets beginner wanted and unwanted scent traits before
    searching from an ephemeral Scent Request.
-9. `qdrant-health` reports SQLite catalog, embedding runtime, and ANN index
+11. `qdrant-health` reports SQLite catalog, embedding runtime, and ANN index
    freshness state.
-10. `rebuild-qdrant-index` rebuilds the ANN index from SQLite Scent Profiles
+12. `rebuild-qdrant-index` rebuilds the ANN index from SQLite Scent Profiles
     without turning the index into the catalog source of truth.
-11. `evaluate-reference-matches` compares exact-cosine and Qdrant ANN retrieval
+13. `evaluate-reference-matches` compares exact-cosine and Qdrant ANN retrieval
     against a separate Reference Match Set answer key.
-12. `generate-scale-test-catalog` creates a deterministic generated Scale-Test
+14. `generate-scale-test-catalog` creates a deterministic generated Scale-Test
     Catalog for performance experiments.
-13. `benchmark-scale-test-catalog` measures exact-cosine versus Qdrant ANN
+15. `benchmark-scale-test-catalog` measures exact-cosine versus Qdrant ANN
     retrieval over the isolated Scale-Test Catalog.
 
 See [how to run the catalog workflow](docs/catalog-import.md) for complete

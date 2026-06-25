@@ -287,6 +287,263 @@ def _import_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _curated_template(args: argparse.Namespace) -> int:
+    writer = csv.writer(sys.stdout, lineterminator="\n")
+    writer.writerow(CURATED_REAL_CATALOG_SCHEMA)
+    print(
+        "Curated Batch rows are drafts until curator_review_status is reviewed; "
+        "keep draft batch CSV files outside the repository.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _curated_preview(args: argparse.Namespace) -> int:
+    source_path = Path(args.source)
+    _validate_source_file(source_path)
+    report: dict[str, Any] = {
+        "status": "ok",
+        "rows": {
+            "total": 0,
+            "ready": 0,
+            "rejected": 0,
+            "duplicates": 0,
+        },
+        "rejections": [],
+        "duplicates": [],
+        "missing_source_urls": {
+            "identity": [],
+            "scent_profile": [],
+        },
+        "review_status": {
+            "missing": [],
+            "not_reviewed": [],
+        },
+        "batch_1": {
+            "ready": 0,
+            "too_weak": 0,
+            "too_weak_rows": [],
+        },
+        "missing_note_groups": {
+            "top": [],
+            "middle": [],
+            "base": [],
+        },
+        "coverage": {
+            "scent_families": [],
+            "repeated_brands": [],
+            "common_notes": [],
+        },
+    }
+    with source_path.open("r", encoding="utf-8-sig", newline="") as source:
+        reader = csv.DictReader(source)
+        if reader.fieldnames != CURATED_REAL_CATALOG_SCHEMA:
+            raise ValueError("Curated Batch CSV schema does not match the curated template")
+        seen_editions: set[tuple[str, str]] = set()
+        for source_row, row in enumerate(reader, start=2):
+            report["rows"]["total"] += 1
+            _record_curated_preview_field_gaps(
+                report, source_row=source_row, row=row
+            )
+            reason = _curated_preview_rejection_reason(row)
+            if reason is not None:
+                _record_curated_preview_rejection(
+                    report, source_row=source_row, reason=reason
+                )
+                continue
+            edition_key = (
+                row["brand"].strip().casefold(),
+                row["fragrance_edition_name"].strip().casefold(),
+            )
+            if edition_key in seen_editions:
+                report["rows"]["duplicates"] += 1
+                report["duplicates"].append(
+                    {
+                        "source_row": source_row,
+                        "fragrance_edition": row["fragrance_edition_name"].strip(),
+                        "brand": row["brand"].strip(),
+                    }
+                )
+                continue
+            seen_editions.add(edition_key)
+            report["rows"]["ready"] += 1
+            _record_curated_preview_coverage(
+                report, source_row=source_row, row=row
+            )
+            _record_curated_preview_batch_1_quality(
+                report, source_row=source_row, row=row
+            )
+    _finalize_curated_preview_coverage(report)
+    print(json.dumps(report, indent=2))
+    return 0
+
+
+def _record_curated_preview_rejection(
+    report: dict[str, Any], *, source_row: int, reason: str
+) -> None:
+    report["rows"]["rejected"] += 1
+    report["rejections"].append({"source_row": source_row, "reason": reason})
+
+
+def _record_curated_preview_field_gaps(
+    report: dict[str, Any], *, source_row: int, row: dict[str | None, str]
+) -> None:
+    if not (row.get("identity_source_urls") or "").strip():
+        report["missing_source_urls"]["identity"].append(source_row)
+    if not (row.get("scent_profile_source_urls") or "").strip():
+        report["missing_source_urls"]["scent_profile"].append(source_row)
+    review_status = (row.get("curator_review_status") or "").strip()
+    if not review_status:
+        report["review_status"]["missing"].append(source_row)
+    elif review_status.casefold() != "reviewed":
+        report["review_status"]["not_reviewed"].append(source_row)
+
+
+def _record_curated_preview_batch_1_quality(
+    report: dict[str, Any], *, source_row: int, row: dict[str, str]
+) -> None:
+    known_groups, unknown_groups = _known_curated_scent_profile_groups(row)
+    _record_curated_preview_missing_note_groups(
+        report, source_row=source_row, row=row
+    )
+    if len(known_groups) >= 2:
+        report["batch_1"]["ready"] += 1
+        return
+
+    report["batch_1"]["too_weak"] += 1
+    report["batch_1"]["too_weak_rows"].append(
+        {
+            "source_row": source_row,
+            "fragrance_edition": row["fragrance_edition_name"].strip(),
+            "brand": row["brand"].strip(),
+            "known_scent_profile_groups": known_groups,
+            "unknown_scent_profile_groups": unknown_groups,
+        }
+    )
+
+
+def _record_curated_preview_coverage(
+    report: dict[str, Any], *, source_row: int, row: dict[str, str]
+) -> None:
+    brand = row.get("brand", "").strip()
+    if brand:
+        brand_rows = report["coverage"].setdefault("_brand_rows", {})
+        brand_rows.setdefault(brand, []).append(source_row)
+
+    scent_family = row.get("scent_family", "").strip().casefold()
+    if scent_family:
+        scent_family_rows = report["coverage"].setdefault("_scent_family_rows", {})
+        scent_family_rows.setdefault(scent_family, []).append(source_row)
+
+    note_rows = report["coverage"].setdefault("_note_rows", {})
+    note_groups = report["coverage"].setdefault("_note_groups", {})
+    for group_name, row_key in (
+        ("top", "top_notes"),
+        ("middle", "middle_notes"),
+        ("base", "base_notes"),
+    ):
+        for note in _normalized_list(row.get(row_key, "")):
+            note_rows.setdefault(note, set()).add(source_row)
+            note_groups.setdefault(note, set()).add(group_name)
+
+
+def _finalize_curated_preview_coverage(report: dict[str, Any]) -> None:
+    scent_family_rows = report["coverage"].pop("_scent_family_rows", {})
+    brand_rows = report["coverage"].pop("_brand_rows", {})
+    note_rows = report["coverage"].pop("_note_rows", {})
+    note_groups = report["coverage"].pop("_note_groups", {})
+    report["coverage"]["scent_families"] = [
+        {
+            "scent_family": scent_family,
+            "count": len(source_rows),
+            "source_rows": source_rows,
+        }
+        for scent_family, source_rows in sorted(
+            scent_family_rows.items(), key=lambda item: (-len(item[1]), item[0])
+        )
+    ]
+    report["coverage"]["repeated_brands"] = [
+        {
+            "brand": brand,
+            "count": len(source_rows),
+            "source_rows": source_rows,
+        }
+        for brand, source_rows in sorted(
+            brand_rows.items(), key=lambda item: (-len(item[1]), item[0].casefold())
+        )
+        if len(source_rows) > 1
+    ]
+    report["coverage"]["common_notes"] = [
+        {
+            "note": note,
+            "count": len(source_rows),
+            "source_rows": sorted(source_rows),
+            "note_groups": sorted(note_groups[note]),
+        }
+        for note, source_rows in sorted(
+            note_rows.items(), key=lambda item: (-len(item[1]), item[0])
+        )
+        if len(source_rows) > 1
+    ]
+
+
+def _known_curated_scent_profile_groups(
+    row: dict[str, str]
+) -> tuple[list[str], list[str]]:
+    groups = {
+        "note_pyramid": any(
+            _normalized_list(row.get(note_group, ""))
+            for note_group in ("top_notes", "middle_notes", "base_notes")
+        ),
+        "main_accords": bool(_normalized_list(row.get("main_accords", ""))),
+        "scent_family": bool(row.get("scent_family", "").strip()),
+    }
+    known = [group for group, is_known in groups.items() if is_known]
+    unknown = [group for group, is_known in groups.items() if not is_known]
+    return known, unknown
+
+
+def _record_curated_preview_missing_note_groups(
+    report: dict[str, Any], *, source_row: int, row: dict[str, str]
+) -> None:
+    note_groups = {
+        "top": "top_notes",
+        "middle": "middle_notes",
+        "base": "base_notes",
+    }
+    for report_key, row_key in note_groups.items():
+        if not _normalized_list(row.get(row_key, "")):
+            report["missing_note_groups"][report_key].append(source_row)
+
+
+def _curated_preview_rejection_reason(row: dict[str | None, str]) -> str | None:
+    if None in row or any(value is None for value in row.values()):
+        return "malformed columns"
+    if not row.get("fragrance_name", "").strip():
+        return "missing fragrance_name"
+    if not row.get("fragrance_edition_name", "").strip():
+        return "missing fragrance_edition_name"
+    if not row.get("brand", "").strip():
+        return "missing brand"
+    if not row.get("identity_source_urls", "").strip():
+        return "missing identity_source_urls"
+    if not row.get("scent_profile_source_urls", "").strip():
+        return "missing scent_profile_source_urls"
+    review_status = row.get("curator_review_status", "").strip()
+    if not review_status:
+        return "missing curator_review_status"
+    if review_status.casefold() != "reviewed":
+        return "curator review status is not reviewed"
+    main_accords = _normalized_list(row.get("main_accords", ""))
+    top_notes = _normalized_list(row.get("top_notes", ""))
+    middle_notes = _normalized_list(row.get("middle_notes", ""))
+    base_notes = _normalized_list(row.get("base_notes", ""))
+    scent_family = row.get("scent_family", "").strip()
+    if not any([main_accords, top_notes, middle_notes, base_notes, scent_family]):
+        return "missing Scent Profile facts"
+    return None
+
+
 def _import_curated_catalog_row(
     connection: sqlite3.Connection,
     *,
@@ -2664,6 +2921,19 @@ def _parser() -> argparse.ArgumentParser:
     )
     inspect_quarantine.add_argument("--database", required=True)
     inspect_quarantine.set_defaults(handler=_inspect_quarantine)
+
+    curated_template = commands.add_parser(
+        "curated-template",
+        help="Print the Curated Batch CSV template for preparing Real Catalog rows",
+    )
+    curated_template.set_defaults(handler=_curated_template)
+
+    curated_preview = commands.add_parser(
+        "curated-preview",
+        help="Preview Curated Batch CSV readiness before Real Catalog import",
+    )
+    curated_preview.add_argument("--source", required=True)
+    curated_preview.set_defaults(handler=_curated_preview)
 
     browse = commands.add_parser(
         "browse", help="Search Real Catalog Fragrance Editions by Fragrance name"

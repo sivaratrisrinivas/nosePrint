@@ -16,9 +16,11 @@ without scraping fragrance communities or importing a gated database.
 Build a manually reviewed seed Real Catalog from factual scent fields published
 on permitted public sources, then keep every row source-traceable.
 
-The seed catalog should favor quality over size. A useful first target is 25-50
-Fragrance Editions across common scent families, with enough overlap to make
-Scent Matches meaningful.
+The seed catalog should favor quality over size. A useful first target is about
+100 Fragrance Editions, curated in small batches. The first 100 should optimize
+for Scent Match coverage, with shopper familiarity as a constraint: include
+recognizable Fragrance Editions, but deliberately spread and overlap scent
+families, notes, and concentrations so matching feels useful rather than sparse.
 
 Each curated row must include:
 
@@ -31,6 +33,47 @@ Each curated row must include:
 - Source URLs used for each fact group.
 - Curator review status and review date.
 - Explicit `unknown` values for facts that the sources do not support.
+
+Batch 1 should use a stricter quality bar than the importer itself. A Fragrance
+Edition should enter Batch 1 only when at least two of these three Scent Profile
+groups are known from permitted sources:
+
+- note pyramid facts: top notes, middle notes, or base notes;
+- main accords;
+- scent family.
+
+A row with only one known group is still useful for later review, but it should
+not be part of the first shopper-facing batch.
+
+Draft batch CSV files should stay outside the repository until review is
+complete. Commit only reviewed batches, templates, and documentation. This keeps
+half-checked rows, messy notes, and source questions out of the permanent repo
+history.
+
+Use a two-pass review before a row becomes Real Catalog:
+
+1. Collect the Fragrance Edition facts and source URLs.
+2. Verify the row against those sources, then mark it `reviewed`.
+
+No row should become Real Catalog just because it was typed into a CSV.
+
+Build a curated batch preview report before adding more rows. The report should
+show:
+
+- ready rows;
+- rejected rows;
+- duplicate Fragrance Editions;
+- rows that pass the importer but are too weak for Batch 1;
+- scent family coverage;
+- repeated brands;
+- common notes and missing note groups;
+- rows missing source URLs or review status.
+
+The goal is to see whether a batch is balanced, useful, and clean before import.
+
+Build the curation workflow tools before adding Batch 1 data. The next PRD
+should focus on the CSV template, preview report, stricter Batch 1 checks, and
+review docs. Batch 1 should be a later issue that uses those tools.
 
 ## Source policy
 

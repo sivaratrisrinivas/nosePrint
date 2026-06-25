@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 import sqlite3
@@ -28,6 +29,347 @@ CURATED_REAL_CATALOG_SCHEMA = [
 
 
 class CatalogWorkflowTests(unittest.TestCase):
+    def test_docs_explain_curated_batch_review_workflow(self) -> None:
+        guide = (ROOT / "docs" / "catalog-import.md").read_text(encoding="utf-8")
+
+        expected_guidance = [
+            "## Review a Curated Batch before Real Catalog import",
+            "Pass 1: collect facts",
+            "Pass 2: verify facts",
+            "Draft Curated Batch CSV files stay outside the repository",
+            "python3 -m noseprint.catalog curated-template",
+            "python3 -m noseprint.catalog curated-preview --source",
+            "Read the preview from the top down",
+            "Batch 1 data is added in a later issue",
+        ]
+        for guidance in expected_guidance:
+            with self.subTest(guidance=guidance):
+                self.assertIn(guidance, guide)
+
+        for term in (
+            "Fragrance",
+            "Fragrance Edition",
+            "Scent Profile",
+            "Scent Match",
+            "Real Catalog",
+            "Curated Batch",
+        ):
+            with self.subTest(term=term):
+                self.assertIn(term, guide)
+
+    def test_curator_generates_curated_batch_csv_template(self) -> None:
+        generated = self.run_catalog("curated-template")
+
+        self.assertEqual(generated.returncode, 0, generated.stderr)
+        rows = list(csv.reader(generated.stdout.splitlines()))
+        self.assertEqual(rows, [CURATED_REAL_CATALOG_SCHEMA])
+        self.assertIn("drafts until curator_review_status is reviewed", generated.stderr)
+
+    def test_curator_previews_ready_curated_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "curated.csv"
+            source.write_text(
+                "fragrance_name,fragrance_edition_name,brand,concentration,"
+                "main_accords,top_notes,middle_notes,base_notes,scent_family,"
+                "identity_source_urls,scent_profile_source_urls,"
+                "curator_review_status,curator_reviewed_on,curation_notes\n"
+                "Sample Rose,Sample Rose EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,Ready row\n"
+                "Quiet Cedar,Quiet Cedar EDT,Fixture House,EDT,"
+                "woody,lemon,jasmine,cedar,woody,"
+                "https://example.test/cedar-id,https://example.test/cedar-profile,"
+                "reviewed,2026-06-25,Ready row\n",
+                encoding="utf-8",
+            )
+
+            previewed = self.run_catalog("curated-preview", "--source", str(source))
+
+            self.assertEqual(previewed.returncode, 0, previewed.stderr)
+            self.assertEqual(
+                json.loads(previewed.stdout),
+                {
+                    "status": "ok",
+                    "rows": {
+                        "total": 2,
+                        "ready": 2,
+                        "rejected": 0,
+                        "duplicates": 0,
+                    },
+                    "rejections": [],
+                    "duplicates": [],
+                    "missing_source_urls": {
+                        "identity": [],
+                        "scent_profile": [],
+                    },
+                    "review_status": {
+                        "missing": [],
+                        "not_reviewed": [],
+                    },
+                    "batch_1": {
+                        "ready": 2,
+                        "too_weak": 0,
+                        "too_weak_rows": [],
+                    },
+                    "missing_note_groups": {
+                        "top": [],
+                        "middle": [],
+                        "base": [],
+                    },
+                    "coverage": {
+                        "scent_families": [
+                            {"scent_family": "floral", "count": 1, "source_rows": [2]},
+                            {"scent_family": "woody", "count": 1, "source_rows": [3]},
+                        ],
+                        "repeated_brands": [
+                            {"brand": "Fixture House", "count": 2, "source_rows": [2, 3]}
+                        ],
+                        "common_notes": [],
+                    },
+                },
+            )
+
+    def test_curator_previews_curated_batch_note_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "curated-overlap.csv"
+            source.write_text(
+                "fragrance_name,fragrance_edition_name,brand,concentration,"
+                "main_accords,top_notes,middle_notes,base_notes,scent_family,"
+                "identity_source_urls,scent_profile_source_urls,"
+                "curator_review_status,curator_reviewed_on,curation_notes\n"
+                "Rose One,Rose One EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/one-id,https://example.test/one-profile,"
+                "reviewed,2026-06-25,Ready row\n"
+                "Rose Two,Rose Two EDT,Fixture House,EDT,"
+                "floral,bergamot,jasmine,musk,floral,"
+                "https://example.test/two-id,https://example.test/two-profile,"
+                "reviewed,2026-06-25,Ready row\n"
+                "Cedar One,Cedar One EDT,Another House,EDT,"
+                "woody,lemon,iris,cedar,woody,"
+                "https://example.test/cedar-id,https://example.test/cedar-profile,"
+                "reviewed,2026-06-25,Ready row\n",
+                encoding="utf-8",
+            )
+
+            previewed = self.run_catalog("curated-preview", "--source", str(source))
+
+            self.assertEqual(previewed.returncode, 0, previewed.stderr)
+            report = json.loads(previewed.stdout)
+            self.assertEqual(
+                report["coverage"],
+                {
+                    "scent_families": [
+                        {"scent_family": "floral", "count": 2, "source_rows": [2, 3]},
+                        {"scent_family": "woody", "count": 1, "source_rows": [4]},
+                    ],
+                    "repeated_brands": [
+                        {"brand": "Fixture House", "count": 2, "source_rows": [2, 3]}
+                    ],
+                    "common_notes": [
+                        {
+                            "note": "bergamot",
+                            "count": 2,
+                            "source_rows": [2, 3],
+                            "note_groups": ["top"],
+                        },
+                        {
+                            "note": "musk",
+                            "count": 2,
+                            "source_rows": [2, 3],
+                            "note_groups": ["base"],
+                        },
+                    ],
+                },
+            )
+
+    def test_curator_previews_curated_batch_rejections_and_duplicates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "curated-mixed.csv"
+            source.write_text(
+                "fragrance_name,fragrance_edition_name,brand,concentration,"
+                "main_accords,top_notes,middle_notes,base_notes,scent_family,"
+                "identity_source_urls,scent_profile_source_urls,"
+                "curator_review_status,curator_reviewed_on,curation_notes\n"
+                "Sample Rose,Sample Rose EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,Ready row\n"
+                "Sample Rose,Sample Rose EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,Duplicate row\n"
+                "Nameless,Nameless EDP,,EDP,floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,Missing brand\n"
+                "Unsourced Identity,Unsourced Identity EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                ",https://example.test/profile,reviewed,2026-06-25,Missing identity source\n"
+                "Unsourced Profile,Unsourced Profile EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,,reviewed,2026-06-25,Missing profile source\n"
+                "No Status,No Status EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,,2026-06-25,Missing status\n"
+                "Draft Rose,Draft Rose EDP,Fixture House,EDP,"
+                "floral,bergamot,rose,musk,floral,"
+                "https://example.test/identity,https://example.test/profile,"
+                "draft,2026-06-25,Not reviewed\n"
+                "Empty Profile,Empty Profile EDP,Fixture House,EDP,,,,,,"
+                "https://example.test/identity,https://example.test/profile,"
+                "reviewed,2026-06-25,No scent facts\n"
+                "Malformed,Malformed EDP,Fixture House,EDP,floral,bergamot,"
+                "rose,musk,floral,https://example.test/identity,"
+                "https://example.test/profile,reviewed,2026-06-25,Too many,values\n",
+                encoding="utf-8",
+            )
+
+            previewed = self.run_catalog("curated-preview", "--source", str(source))
+
+            self.assertEqual(previewed.returncode, 0, previewed.stderr)
+            self.assertEqual(
+                json.loads(previewed.stdout),
+                {
+                    "status": "ok",
+                    "rows": {
+                        "total": 9,
+                        "ready": 1,
+                        "rejected": 7,
+                        "duplicates": 1,
+                    },
+                    "rejections": [
+                        {
+                            "source_row": 4,
+                            "reason": "missing brand",
+                        },
+                        {
+                            "source_row": 5,
+                            "reason": "missing identity_source_urls",
+                        },
+                        {
+                            "source_row": 6,
+                            "reason": "missing scent_profile_source_urls",
+                        },
+                        {
+                            "source_row": 7,
+                            "reason": "missing curator_review_status",
+                        },
+                        {
+                            "source_row": 8,
+                            "reason": "curator review status is not reviewed",
+                        },
+                        {
+                            "source_row": 9,
+                            "reason": "missing Scent Profile facts",
+                        },
+                        {
+                            "source_row": 10,
+                            "reason": "malformed columns",
+                        },
+                    ],
+                    "duplicates": [
+                        {
+                            "source_row": 3,
+                            "fragrance_edition": "Sample Rose EDP",
+                            "brand": "Fixture House",
+                        }
+                    ],
+                    "missing_source_urls": {
+                        "identity": [5],
+                        "scent_profile": [6],
+                    },
+                    "review_status": {
+                        "missing": [7],
+                        "not_reviewed": [8],
+                    },
+                    "batch_1": {
+                        "ready": 1,
+                        "too_weak": 0,
+                        "too_weak_rows": [],
+                    },
+                    "missing_note_groups": {
+                        "top": [],
+                        "middle": [],
+                        "base": [],
+                    },
+                    "coverage": {
+                        "scent_families": [
+                            {"scent_family": "floral", "count": 1, "source_rows": [2]}
+                        ],
+                        "repeated_brands": [],
+                        "common_notes": [],
+                    },
+                },
+            )
+
+    def test_curator_previews_batch_1_quality_for_known_scent_profile_groups(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "curated-quality.csv"
+            source.write_text(
+                "fragrance_name,fragrance_edition_name,brand,concentration,"
+                "main_accords,top_notes,middle_notes,base_notes,scent_family,"
+                "identity_source_urls,scent_profile_source_urls,"
+                "curator_review_status,curator_reviewed_on,curation_notes\n"
+                "Zero Groups,Zero Groups EDP,Fixture House,EDP,,,,,,"
+                "https://example.test/zero-id,https://example.test/zero-profile,"
+                "reviewed,2026-06-25,Rejected by import rules\n"
+                "One Group,One Group EDP,Fixture House,EDP,floral,,,,,"
+                "https://example.test/one-id,https://example.test/one-profile,"
+                "reviewed,2026-06-25,Importable but weak for Batch 1\n"
+                "Two Groups,Two Groups EDP,Fixture House,EDP,woody,cedar,,,,"
+                "https://example.test/two-id,https://example.test/two-profile,"
+                "reviewed,2026-06-25,Batch 1 ready\n"
+                "Three Groups,Three Groups EDP,Fixture House,EDP,fresh,lemon,"
+                "neroli,musk,citrus,https://example.test/three-id,"
+                "https://example.test/three-profile,reviewed,2026-06-25,"
+                "Batch 1 ready\n",
+                encoding="utf-8",
+            )
+
+            previewed = self.run_catalog("curated-preview", "--source", str(source))
+
+            self.assertEqual(previewed.returncode, 0, previewed.stderr)
+            report = json.loads(previewed.stdout)
+            self.assertEqual(
+                report["rows"],
+                {
+                    "total": 4,
+                    "ready": 3,
+                    "rejected": 1,
+                    "duplicates": 0,
+                },
+            )
+            self.assertEqual(
+                report["batch_1"],
+                {
+                    "ready": 2,
+                    "too_weak": 1,
+                    "too_weak_rows": [
+                        {
+                            "source_row": 3,
+                            "fragrance_edition": "One Group EDP",
+                            "brand": "Fixture House",
+                            "known_scent_profile_groups": ["main_accords"],
+                            "unknown_scent_profile_groups": [
+                                "note_pyramid",
+                                "scent_family",
+                            ],
+                        }
+                    ],
+                },
+            )
+            self.assertEqual(
+                report["missing_note_groups"],
+                {
+                    "top": [3],
+                    "middle": [3, 4],
+                    "base": [3, 4],
+                },
+            )
+
     def test_shopper_searches_real_catalog_and_sees_distinct_fragrance_editions(
         self,
     ) -> None:

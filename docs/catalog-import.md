@@ -34,6 +34,82 @@ For shopper-facing quality, prefer a small manually reviewed seed Real Catalog
 over the current low-detail prototype dataset. See
 [`docs/curated-real-catalog.md`](curated-real-catalog.md) for the source policy.
 
+## Review a Curated Batch before Real Catalog import
+
+A Curated Batch is a working set of candidate Real Catalog rows. Batch review is
+separate from import: first prepare and preview the Curated Batch, then import
+only after every row that should ship has been verified.
+
+Pass 1: collect facts. Create a draft Curated Batch CSV, then fill in one
+Fragrance Edition per row with Fragrance name, Fragrance Edition name, brand,
+concentration when known, Scent Profile facts, identity source URLs, Scent
+Profile source URLs, and curation notes. Use explicit `unknown` values when a
+permitted source does not support a fact. Draft Curated Batch CSV files stay
+outside the repository while facts are still being collected.
+
+Pass 2: verify facts. Re-open each source URL, check that the row still matches
+the source, confirm that the Scent Profile facts are factual rather than copied
+marketing prose, and set `curator_review_status` to `reviewed` only after that
+check is complete. Commit only reviewed Curated Batch files, templates, docs,
+and source-traceable data. Half-reviewed rows stay outside the repository.
+
+Generate a header-only Curated Batch CSV template with:
+
+```bash
+python3 -m noseprint.catalog curated-template > /tmp/curated-batch.csv
+```
+
+Rows remain drafts until `curator_review_status` is set to `reviewed`.
+Draft Curated Batch CSV files stay outside the repository until review is
+complete.
+
+Preview a draft Curated Batch before import with:
+
+```bash
+python3 -m noseprint.catalog curated-preview --source /tmp/curated-batch.csv
+```
+
+The preview is read-only. It reports ready, rejected, and duplicate rows, plus
+rows missing identity source URLs, Scent Profile source URLs, or a reviewed
+curator status. It also reports the stricter Batch 1 quality result: rows are
+Batch 1 ready only when at least two of note pyramid facts, main accords, and
+scent family are known. Rows that pass import rules but are too weak for Batch 1
+are reported separately, and the preview lists missing top, middle, and base note
+groups so weak Scent Profiles are easy to spot.
+
+Read the preview from the top down:
+
+- `rows.ready` should match the rows intended for Real Catalog import.
+- `rows.rejected`, `rejections`, `missing_source_urls`, and `review_status`
+  must be resolved before import.
+- `duplicates` should contain only rows intentionally skipped because the same
+  brand and Fragrance Edition already appeared earlier in the Curated Batch.
+- `batch_1.ready` should contain only rows that meet the Batch 1 quality bar:
+  at least two known Scent Profile groups across note pyramid facts, main
+  accords, and scent family.
+- `batch_1.too_weak_rows` identifies importable rows that should wait for a
+  later Curated Batch because their Scent Profile is too sparse for useful Scent
+  Matches.
+- `missing_note_groups` shows which ready rows still lack top, middle, or base
+  notes.
+
+The preview also includes a `coverage` section for ready, non-duplicate rows:
+
+- `scent_families` counts each known scent family, so a Curated Batch does not
+  quietly lean too hard into one family.
+- `repeated_brands` lists brands with more than one ready Fragrance Edition, so
+  one brand does not dominate by accident.
+- `common_notes` lists top, middle, and base notes that appear in more than one
+  ready Fragrance Edition, so useful Scent Match overlap is visible before
+  import.
+
+Coverage is calculated only from facts present in the Curated Batch CSV. Missing
+facts remain unknown and are not inferred.
+
+Batch 1 data is added in a later issue. This workflow prepares, previews, and
+reviews Curated Batch files; it does not add new Fragrance Editions to the Real
+Catalog by itself.
+
 The curated CSV schema is:
 
 ```text
