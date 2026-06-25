@@ -1,20 +1,22 @@
-# Curated Real Catalog strategy
+# Curated Real Catalog enrichment strategy
 
 Last reviewed: 2026-06-25.
 
-NosePrint should use a small, manually curated Real Catalog before pursuing a
-large commercial catalog. The current Kaggle candidate is useful for workflow
-testing, but it leaves too many Scent Profile facts unknown. Fragrances of the
-World remains the best large product-quality fit, but it is subscription-gated
-and must not be treated as available unless the project has a lawful license.
+NosePrint now uses the TidyTuesday Parfumo CSV as the Real Catalog for the local
+application. Manual curation remains useful as a future enrichment path for
+Comparable Prices, Wear Profiles, and source-reviewed corrections, but it no
+longer blocks the first usable app catalog. Fragrances of the World remains a
+strong large product-quality fit, but it is subscription-gated and must not be
+treated as available unless the project has a lawful license.
 
 This document records the permitted-source route to make the app feel real
 without scraping fragrance communities or importing a gated database.
 
 ## Decision
 
-Build a manually reviewed seed Real Catalog from factual scent fields published
-on permitted public sources, then keep every row source-traceable.
+Use Parfumo as the current app Real Catalog. Build manually reviewed enrichment
+batches only when the app needs facts Parfumo does not provide or corrections
+that should be source-traceable.
 
 The seed catalog should favor quality over size. A useful first target is about
 100 Fragrance Editions, curated in small batches. The first 100 should optimize
@@ -171,16 +173,13 @@ Body:
 ```text
 ## Goal
 
-Add a curated Real Catalog import path for a small, manually reviewed seed
-catalog. This replaces the current low-quality prototype dataset for shopper
-workflows without relying on a gated commercial source.
+Add a curated Real Catalog enrichment path for reviewed facts that are not
+present in the Parfumo app catalog.
 
 ## Context
 
-The current Kaggle candidate lacks main accords, note pyramid, and scent family.
-Fragrances of the World is the best large product-quality source, but it is
-subscription-gated and not licensed for this repo. Use the manual curation
-route described in docs/curated-real-catalog.md.
+The TidyTuesday Parfumo CSV is the current Real Catalog. Use the manual curation
+route described in docs/curated-real-catalog.md only for reviewed enrichment.
 
 ## Acceptance criteria
 

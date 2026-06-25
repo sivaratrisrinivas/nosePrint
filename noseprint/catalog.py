@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import math
 import os
@@ -11,6 +14,7 @@ import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Sequence
+from urllib.parse import parse_qs, urlparse
 
 
 EXIT_BLOCKED = 2
@@ -36,6 +40,24 @@ CURATED_REAL_CATALOG_SCHEMA = [
     "curator_reviewed_on",
     "curation_notes",
 ]
+TIDYTUESDAY_PARFUMO_SCHEMA = [
+    "Number",
+    "Name",
+    "Brand",
+    "Release_Year",
+    "Concentration",
+    "Rating_Value",
+    "Rating_Count",
+    "Main_Accords",
+    "Top_Notes",
+    "Middle_Notes",
+    "Base_Notes",
+    "Perfumers",
+    "URL",
+]
+TIDYTUESDAY_PARFUMO_DATASET_ID = "tidytuesday-parfumo-2024-12-10"
+DEFAULT_APP_DATABASE = Path("var/noseprint.sqlite3")
+DEFAULT_APP_INDEX = Path("var/qdrant-index.json")
 
 
 def _sha256(path: Path) -> str:
@@ -92,23 +114,7 @@ def _audit(args: argparse.Namespace) -> int:
 
 def _import_catalog(args: argparse.Namespace) -> int:
     report = json.loads(Path(args.audit_report).read_text(encoding="utf-8"))
-    owner_accepted_risk = bool(args.accept_owner_risk)
-    risk_note = (args.risk_note or "").strip()
-    if owner_accepted_risk:
-        if len(risk_note) < 20:
-            print(
-                "Import blocked: owner risk acceptance needs a clear risk note.",
-                file=sys.stderr,
-            )
-            return EXIT_BLOCKED
-        if not _report_owner_accepted_importable(report):
-            print(
-                "Import blocked: owner risk acceptance still requires a valid "
-                "inconclusive audit with matching schema and row count.",
-                file=sys.stderr,
-            )
-            return EXIT_BLOCKED
-    elif not _report_passes(report):
+    if not _report_passes(report):
         print("Import blocked: audit verdict is not PASSED.", file=sys.stderr)
         return EXIT_BLOCKED
     source_path = Path(args.source)
@@ -152,8 +158,8 @@ def _import_catalog(args: argparse.Namespace) -> int:
                 dataset["publisher"],
                 dataset["claimed_license"],
                 json.dumps(report, sort_keys=True),
-                1 if owner_accepted_risk else 0,
-                risk_note if owner_accepted_risk else None,
+                0,
+                None,
             ),
         )
         with source_path.open("r", encoding="utf-8-sig", newline="") as source:
@@ -727,18 +733,6 @@ def _report_passes(report: dict[str, Any]) -> bool:
         and dataset.get("provenance_status") == "passed"
         and bool(dataset.get("provenance_evidence"))
         and dataset.get("quality_status") == "passed"
-    )
-
-
-def _report_owner_accepted_importable(report: dict[str, Any]) -> bool:
-    checks = report.get("checks", {})
-    return (
-        report.get("verdict") == "inconclusive"
-        and set(checks) == REQUIRED_AUDIT_CHECKS
-        and checks.get("schema") is True
-        and checks.get("row_count") is True
-        and bool(report.get("observed", {}).get("source_sha256"))
-        and isinstance(report.get("dataset"), dict)
     )
 
 
@@ -1958,6 +1952,221 @@ def _generate_scale_test_catalog(args: argparse.Namespace) -> int:
     return 0
 
 
+def _import_parfumo_real_catalog(args: argparse.Namespace) -> int:
+    report = _import_parfumo_real_catalog_file(Path(args.source), Path(args.database))
+    print(json.dumps(report, indent=2))
+    return 0
+
+
+def _import_parfumo_real_catalog_file(source_path: Path, database: Path) -> dict[str, Any]:
+    _validate_source_file(source_path)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    counts = {
+        "accepted": 0,
+        "duplicates": 0,
+        "quarantined": 0,
+        "rejected": 0,
+    }
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        _create_schema(connection)
+        _create_embedding_schema(connection)
+        _create_comparable_price_schema(connection)
+        _create_wear_profile_schema(connection)
+        _clear_catalog(connection)
+        connection.execute(
+            """
+            INSERT INTO catalog_sources
+                (dataset_id, download_url, publisher, claimed_license, audit_report_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (dataset_id) DO UPDATE SET
+                download_url = excluded.download_url,
+                publisher = excluded.publisher,
+                claimed_license = excluded.claimed_license,
+                audit_report_json = excluded.audit_report_json
+            """,
+            (
+                TIDYTUESDAY_PARFUMO_DATASET_ID,
+                "https://raw.githubusercontent.com/rfordatascience/tidytuesday/main/data/2024/2024-12-10/parfumo_data_clean.csv",
+                "TidyTuesday / Parfumo Kaggle dataset",
+                "Parfumo dataset for NosePrint Real Catalog",
+                json.dumps(
+                    {
+                        "purpose": "NosePrint Real Catalog data",
+                        "source_sha256": _sha256(source_path),
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        seen_editions: set[tuple[str, str, str | None]] = set()
+        next_id = 1
+        with source_path.open("r", encoding="utf-8-sig", newline="") as source:
+            reader = csv.DictReader(source)
+            if reader.fieldnames != TIDYTUESDAY_PARFUMO_SCHEMA:
+                raise ValueError("TidyTuesday Parfumo CSV schema does not match")
+            for source_row, row in enumerate(reader, start=2):
+                original_values = _json_safe_row(row)
+                if None in row or any(value is None for value in row.values()):
+                    _record_disposition(
+                        connection,
+                        dataset_id=TIDYTUESDAY_PARFUMO_DATASET_ID,
+                        source_row=source_row,
+                        disposition="rejected",
+                        reason="malformed columns",
+                        original_values=original_values,
+                    )
+                    counts["rejected"] += 1
+                    continue
+                brand = _parfumo_value(row.get("Brand", ""))
+                name = _parfumo_value(row.get("Name", ""))
+                concentration = _parfumo_value(row.get("Concentration", ""))
+                if not brand or not name:
+                    _record_disposition(
+                        connection,
+                        dataset_id=TIDYTUESDAY_PARFUMO_DATASET_ID,
+                        source_row=source_row,
+                        disposition="rejected",
+                        reason="missing identity",
+                        original_values=original_values,
+                    )
+                    counts["rejected"] += 1
+                    continue
+                edition_key = (brand.casefold(), name.casefold(), concentration)
+                if edition_key in seen_editions:
+                    _record_disposition(
+                        connection,
+                        dataset_id=TIDYTUESDAY_PARFUMO_DATASET_ID,
+                        source_row=source_row,
+                        disposition="duplicate",
+                        reason="duplicate Fragrance Edition",
+                        original_values=original_values,
+                    )
+                    counts["duplicates"] += 1
+                    continue
+
+                top_notes = _parfumo_list(row.get("Top_Notes", ""))
+                middle_notes = _parfumo_list(row.get("Middle_Notes", ""))
+                base_notes = _parfumo_list(row.get("Base_Notes", ""))
+                main_accords = _parfumo_list(row.get("Main_Accords", ""))
+                notes = sorted({*top_notes, *middle_notes, *base_notes})
+                scent_family = _parfumo_first_item(row.get("Main_Accords", ""))
+                if not any([notes, main_accords, scent_family]):
+                    _record_disposition(
+                        connection,
+                        dataset_id=TIDYTUESDAY_PARFUMO_DATASET_ID,
+                        source_row=source_row,
+                        disposition="quarantined",
+                        reason="missing Scent Profile facts",
+                        original_values=original_values,
+                    )
+                    counts["quarantined"] += 1
+                    continue
+
+                fragrance_id = next_id
+                edition_id = next_id
+                next_id += 1
+                connection.execute(
+                    "INSERT INTO fragrances (id, name, brand) VALUES (?, ?, ?)",
+                    (fragrance_id, name, brand),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO fragrance_editions
+                        (id, fragrance_id, name, concentration, catalog_kind)
+                    VALUES (?, ?, ?, ?, 'real')
+                    """,
+                    (edition_id, fragrance_id, name, concentration),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO scent_profiles
+                        (fragrance_edition_id, notes_json, main_accords_json,
+                         top_notes_json, middle_notes_json, base_notes_json,
+                         scent_family)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        edition_id,
+                        json.dumps(notes),
+                        _json_or_null(main_accords),
+                        _json_or_null(top_notes),
+                        _json_or_null(middle_notes),
+                        _json_or_null(base_notes),
+                        scent_family,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO source_records
+                        (dataset_id, source_row, fragrance_edition_id,
+                         original_values_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        TIDYTUESDAY_PARFUMO_DATASET_ID,
+                        source_row,
+                        edition_id,
+                        json.dumps(original_values, sort_keys=True),
+                    ),
+                )
+                seen_editions.add(edition_key)
+                counts["accepted"] += 1
+        connection.commit()
+    finally:
+        connection.close()
+
+    return {
+        "status": "imported",
+        "real_catalog": {
+            "dataset_id": TIDYTUESDAY_PARFUMO_DATASET_ID,
+            "source": str(source_path),
+            "catalog_kind": "real",
+            **counts,
+            "catalog_notice": (
+                "TidyTuesday Parfumo records are the NosePrint Real Catalog."
+            ),
+        },
+    }
+
+
+def _clear_catalog(connection: sqlite3.Connection) -> None:
+    connection.execute("DELETE FROM scent_profile_embeddings")
+    connection.execute("DELETE FROM comparable_prices")
+    connection.execute("DELETE FROM wear_profiles")
+    connection.execute("DELETE FROM scent_profiles")
+    connection.execute("DELETE FROM source_records")
+    connection.execute("DELETE FROM import_dispositions")
+    connection.execute("DELETE FROM fragrance_editions")
+    connection.execute("DELETE FROM fragrances")
+
+
+def _parfumo_value(value: str) -> str | None:
+    normalized = value.strip()
+    if not normalized or normalized.casefold() in {"na", "n/a", "nan"}:
+        return None
+    return normalized
+
+
+def _parfumo_list(value: str) -> list[str]:
+    normalized = _parfumo_value(value)
+    if normalized is None:
+        return []
+    return _normalized_list(normalized)
+
+
+def _parfumo_first_item(value: str) -> str | None:
+    normalized = _parfumo_value(value)
+    if normalized is None:
+        return None
+    for item in normalized.split(","):
+        item = item.strip().casefold()
+        if item:
+            return item
+    return None
+
+
 def _replace_scale_test_catalog(
     connection: sqlite3.Connection,
     *,
@@ -1992,36 +2201,7 @@ def _replace_scale_test_catalog(
             ),
         ),
     )
-    scale_test_ids = [
-        row["id"]
-        for row in connection.execute(
-            "SELECT id FROM fragrance_editions WHERE catalog_kind = 'scale-test'"
-        ).fetchall()
-    ]
-    if scale_test_ids:
-        placeholders = ",".join("?" for _ in scale_test_ids)
-        connection.execute(
-            f"DELETE FROM scent_profile_embeddings WHERE fragrance_edition_id IN ({placeholders})",
-            scale_test_ids,
-        )
-        connection.execute(
-            f"DELETE FROM scent_profiles WHERE fragrance_edition_id IN ({placeholders})",
-            scale_test_ids,
-        )
-        connection.execute(
-            f"DELETE FROM source_records WHERE fragrance_edition_id IN ({placeholders})",
-            scale_test_ids,
-        )
-        connection.execute(
-            f"DELETE FROM fragrance_editions WHERE id IN ({placeholders})",
-            scale_test_ids,
-        )
-    connection.execute(
-        """
-        DELETE FROM fragrances
-        WHERE id NOT IN (SELECT fragrance_id FROM fragrance_editions)
-        """
-    )
+    _clear_scale_test_catalog(connection)
     for offset in range(records):
         generated = _scale_test_record(seed, offset)
         connection.execute(
@@ -2081,6 +2261,39 @@ def _replace_scale_test_catalog(
                 ),
             ),
         )
+
+
+def _clear_scale_test_catalog(connection: sqlite3.Connection) -> None:
+    scale_test_ids = [
+        row["id"]
+        for row in connection.execute(
+            "SELECT id FROM fragrance_editions WHERE catalog_kind = 'scale-test'"
+        ).fetchall()
+    ]
+    if scale_test_ids:
+        placeholders = ",".join("?" for _ in scale_test_ids)
+        connection.execute(
+            f"DELETE FROM scent_profile_embeddings WHERE fragrance_edition_id IN ({placeholders})",
+            scale_test_ids,
+        )
+        connection.execute(
+            f"DELETE FROM scent_profiles WHERE fragrance_edition_id IN ({placeholders})",
+            scale_test_ids,
+        )
+        connection.execute(
+            f"DELETE FROM source_records WHERE fragrance_edition_id IN ({placeholders})",
+            scale_test_ids,
+        )
+        connection.execute(
+            f"DELETE FROM fragrance_editions WHERE id IN ({placeholders})",
+            scale_test_ids,
+        )
+    connection.execute(
+        """
+        DELETE FROM fragrances
+        WHERE id NOT IN (SELECT fragrance_id FROM fragrance_editions)
+        """
+    )
 
 
 def _scale_test_record(seed: int, offset: int) -> dict[str, Any]:
@@ -2143,6 +2356,376 @@ def _scale_test_choices(
 def _scale_test_index(seed: int, offset: int, salt: str, size: int) -> int:
     digest = hashlib.sha256(f"{seed}:{offset}:{salt}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") % size
+
+
+APP_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NosePrint</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f7f5f0;
+      --panel: #ffffff;
+      --text: #20201d;
+      --muted: #65635c;
+      --line: #d9d5cb;
+      --accent: #2f6f68;
+      --accent-strong: #174d47;
+      --warn: #8a4b16;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      letter-spacing: 0;
+    }
+    main { width: min(1120px, calc(100vw - 32px)); margin: 0 auto; padding: 28px 0 40px; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 16px;
+    }
+    h1 { margin: 0; font-size: 28px; line-height: 1.1; }
+    h2 { margin: 0 0 12px; font-size: 16px; }
+    p { margin: 0; color: var(--muted); line-height: 1.45; }
+    .status { font-size: 13px; color: var(--muted); text-align: right; }
+    .grid { display: grid; grid-template-columns: 320px 1fr; gap: 20px; margin-top: 20px; align-items: start; }
+    section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
+    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+    .search-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+    input, button { min-height: 40px; border-radius: 6px; border: 1px solid var(--line); font: inherit; }
+    input { width: 100%; padding: 0 10px; background: #fff; color: var(--text); }
+    button { padding: 0 12px; background: var(--accent); color: white; border-color: var(--accent); cursor: pointer; }
+    button:focus, input:focus { outline: 3px solid rgba(47, 111, 104, 0.25); outline-offset: 2px; }
+    .list { display: grid; gap: 8px; margin-top: 14px; }
+    .result { width: 100%; display: block; text-align: left; background: #fff; color: var(--text); border-color: var(--line); padding: 10px; min-height: 0; }
+    .result strong, .match strong { display: block; font-size: 14px; }
+    .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .facts { display: grid; gap: 10px; }
+    .fact span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 3px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; background: #fbfaf7; }
+    .matches { display: grid; gap: 10px; }
+    .match { border-top: 1px solid var(--line); padding-top: 10px; }
+    .score { color: var(--accent-strong); font-size: 12px; margin-top: 4px; }
+    .empty { color: var(--muted); padding: 12px 0; }
+    .warning { color: var(--warn); }
+    @media (max-width: 760px) {
+      header { align-items: start; flex-direction: column; }
+      .status { text-align: left; }
+      .grid, .detail-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>NosePrint</h1>
+        <p>Search the Parfumo Real Catalog and compare Fragrance Editions by Scent Profile.</p>
+      </div>
+      <div class="status" id="catalog-status">Loading catalog...</div>
+    </header>
+    <div class="grid">
+      <section aria-labelledby="search-title">
+        <h2 id="search-title">Find a Fragrance</h2>
+        <form id="search-form">
+          <label for="query">Fragrance name</label>
+          <div class="search-row">
+            <input id="query" name="query" type="search" value="rose" autocomplete="off">
+            <button type="submit">Search</button>
+          </div>
+        </form>
+        <div class="list" id="results" role="list"></div>
+      </section>
+      <section aria-labelledby="profile-title">
+        <h2 id="profile-title">Selected Fragrance Edition</h2>
+        <div id="profile" class="empty">Choose a search result to inspect its Scent Profile.</div>
+      </section>
+    </div>
+  </main>
+  <script>
+    const statusEl = document.querySelector("#catalog-status");
+    const resultsEl = document.querySelector("#results");
+    const profileEl = document.querySelector("#profile");
+    const form = document.querySelector("#search-form");
+    const queryInput = document.querySelector("#query");
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, character => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[character]));
+    }
+
+    function text(value) {
+      if (Array.isArray(value)) return value.join(", ");
+      return value || "unknown";
+    }
+
+    function chips(value) {
+      const values = Array.isArray(value) && value.length ? value : ["unknown"];
+      return `<div class="chips">${values.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div>`;
+    }
+
+    async function loadStatus() {
+      const response = await fetch("/api/status");
+      const data = await response.json();
+      statusEl.textContent = `${data.real_catalog_records.toLocaleString()} Real Catalog records`;
+    }
+
+    async function search(query) {
+      resultsEl.innerHTML = `<div class="empty">Searching...</div>`;
+      const response = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+      const data = await response.json();
+      if (!data.results.length) {
+        resultsEl.innerHTML = `<div class="empty">No matches.</div>`;
+        return;
+      }
+      resultsEl.innerHTML = data.results.map(result => `
+        <button class="result" type="button" data-id="${result.fragrance_edition_id}">
+          <strong>${escapeHtml(result.fragrance)}</strong>
+          <div class="meta">${escapeHtml(result.edition)}${result.concentration ? " &middot; " + escapeHtml(result.concentration) : ""}</div>
+        </button>
+      `).join("");
+      resultsEl.querySelectorAll("button").forEach(button => {
+        button.addEventListener("click", () => loadProfile(button.dataset.id));
+      });
+      await loadProfile(data.results[0].fragrance_edition_id);
+    }
+
+    async function loadProfile(id) {
+      profileEl.innerHTML = `<div class="empty">Loading Scent Profile...</div>`;
+      const [profileResponse, matchesResponse] = await Promise.all([
+        fetch(`/api/profile?id=${encodeURIComponent(id)}`),
+        fetch(`/api/matches?id=${encodeURIComponent(id)}&limit=5`)
+      ]);
+      const profile = await profileResponse.json();
+      const matches = await matchesResponse.json();
+      if (profile.status !== "ok") {
+        profileEl.innerHTML = `<div class="empty warning">Fragrance Edition not found.</div>`;
+        return;
+      }
+      const scent = profile.scent_profile;
+      profileEl.innerHTML = `
+        <div class="detail-grid">
+          <div class="facts">
+            <div>
+              <strong>${escapeHtml(profile.edition)}</strong>
+              <div class="meta">${escapeHtml(profile.fragrance)}${profile.concentration ? " &middot; " + escapeHtml(profile.concentration) : ""}</div>
+            </div>
+            <div class="fact"><span>Main accords</span>${chips(scent.main_accords)}</div>
+            <div class="fact"><span>Top notes</span>${chips(scent.note_pyramid.top)}</div>
+            <div class="fact"><span>Middle notes</span>${chips(scent.note_pyramid.middle)}</div>
+            <div class="fact"><span>Base notes</span>${chips(scent.note_pyramid.base)}</div>
+            <div class="fact"><span>Scent family</span><div class="chip">${escapeHtml(text(scent.scent_family))}</div></div>
+          </div>
+          <div>
+            <h2>Scent Matches</h2>
+            <div class="matches">
+              ${(matches.results || []).map(match => `
+                <div class="match">
+                  <strong>${escapeHtml(match.edition)}</strong>
+                  <div class="meta">${escapeHtml(match.fragrance)}${match.concentration ? " &middot; " + escapeHtml(match.concentration) : ""}</div>
+                  <div class="score">${escapeHtml(match.scent_match.strength_label)} &middot; ${escapeHtml(match.scent_match.model_specific_score)}</div>
+                </div>
+              `).join("") || `<div class="empty">No matches yet.</div>`}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      search(queryInput.value.trim());
+    });
+
+    loadStatus().then(() => search(queryInput.value));
+  </script>
+</body>
+</html>
+"""
+
+
+def _json_response_from_handler(handler: Any, args: argparse.Namespace) -> dict[str, Any]:
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        exit_code = handler(args)
+    if exit_code != 0:
+        return {"status": "error", "message": output.getvalue().strip()}
+    return json.loads(output.getvalue())
+
+
+def _app_status(database: Path) -> dict[str, Any]:
+    connection = sqlite3.connect(database)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = _real_catalog_scent_profile_rows(connection)
+    finally:
+        connection.close()
+    return {
+        "status": "ok",
+        "real_catalog_records": len(rows),
+        "database": str(database),
+    }
+
+
+def _make_app_handler(database: Path, index: Path) -> type[BaseHTTPRequestHandler]:
+    class NosePrintAppHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+            try:
+                if parsed.path == "/":
+                    self._send_html(APP_HTML)
+                elif parsed.path == "/api/status":
+                    self._send_json(_app_status(database))
+                elif parsed.path == "/api/search":
+                    self._send_json(
+                        _json_response_from_handler(
+                            _browse,
+                            argparse.Namespace(
+                                database=str(database),
+                                query=query.get("q", [""])[0],
+                            ),
+                        )
+                    )
+                elif parsed.path == "/api/profile":
+                    self._send_json(
+                        _json_response_from_handler(
+                            _scent_profile,
+                            argparse.Namespace(
+                                database=str(database),
+                                edition_id=int(query.get("id", ["0"])[0]),
+                            ),
+                        )
+                    )
+                elif parsed.path == "/api/matches":
+                    self._send_json(
+                        _json_response_from_handler(
+                            _scent_matches,
+                            argparse.Namespace(
+                                database=str(database),
+                                index=str(index) if index.exists() else None,
+                                edition_id=int(query.get("id", ["0"])[0]),
+                                limit=int(query.get("limit", ["5"])[0]),
+                                show_prices=False,
+                                cheaper_only=False,
+                                show_wear_profiles=False,
+                                wear_longevity=None,
+                                wear_projection=None,
+                            ),
+                        )
+                    )
+                else:
+                    self.send_error(404)
+            except (ValueError, sqlite3.Error, json.JSONDecodeError) as error:
+                self._send_json({"status": "error", "message": str(error)}, status=500)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            return
+
+        def _send_html(self, body: str) -> None:
+            encoded = body.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+            encoded = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+    return NosePrintAppHandler
+
+
+def _run_app(args: argparse.Namespace) -> int:
+    database = Path(args.database)
+    index = Path(args.index)
+    source = Path(args.source) if args.source else None
+    if source is not None:
+        import_report = _import_parfumo_real_catalog_file(source, database)
+        if import_report["real_catalog"]["accepted"] == 0:
+            print(
+                "App startup blocked: Parfumo import accepted no Real Catalog rows.",
+                file=sys.stderr,
+            )
+            return EXIT_BLOCKED
+    elif not database.exists():
+        print(
+            "App startup blocked: pass --source /path/to/parfumo_data_clean.csv "
+            "the first time you run NosePrint.",
+            file=sys.stderr,
+        )
+        return EXIT_BLOCKED
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        _rebuild_qdrant_index(
+            argparse.Namespace(database=str(database), index=str(index))
+        )
+    status = _app_status(database)
+    if args.prepare_only:
+        print(
+            json.dumps(
+                {
+                    "status": "prepared",
+                    "app": {
+                        "url": f"http://{args.host}:{args.port}/",
+                        "database": str(database),
+                        "index": str(index),
+                        "real_catalog_records": status["real_catalog_records"],
+                    },
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    server = ThreadingHTTPServer(
+        (args.host, args.port),
+        _make_app_handler(database, index),
+    )
+    host = args.host if args.host != "0.0.0.0" else "localhost"
+    print(
+        json.dumps(
+            {
+                "status": "running",
+                "app": {
+                    "url": f"http://{host}:{server.server_port}/",
+                    "database": str(database),
+                    "index": str(index),
+                    "real_catalog_records": status["real_catalog_records"],
+                },
+            },
+            indent=2,
+        ),
+        flush=True,
+    )
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        server.server_close()
+    return 0
 
 
 def _benchmark_scale_test_catalog(args: argparse.Namespace) -> int:
@@ -2886,6 +3469,25 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="noseprint-catalog")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    run = commands.add_parser(
+        "run",
+        help="Import the Parfumo Real Catalog, rebuild the index, and serve the NosePrint UI",
+    )
+    run.add_argument(
+        "--source",
+        help="Path to parfumo_data_clean.csv. Required the first time; re-imports and replaces the Real Catalog when provided.",
+    )
+    run.add_argument("--database", default=str(DEFAULT_APP_DATABASE))
+    run.add_argument("--index", default=str(DEFAULT_APP_INDEX))
+    run.add_argument("--host", default="127.0.0.1")
+    run.add_argument("--port", type=int, default=8000)
+    run.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Prepare SQLite and the local ANN index without starting the web server.",
+    )
+    run.set_defaults(handler=_run_app)
+
     audit = commands.add_parser("audit", help="Audit a candidate Real Catalog source")
     audit.add_argument("--manifest", required=True)
     audit.add_argument("--source", required=True)
@@ -2898,18 +3500,6 @@ def _parser() -> argparse.ArgumentParser:
     import_catalog.add_argument("--audit-report", required=True)
     import_catalog.add_argument("--source", required=True)
     import_catalog.add_argument("--database", required=True)
-    import_catalog.add_argument(
-        "--accept-owner-risk",
-        action="store_true",
-        help=(
-            "Import an inconclusive source only after the project owner accepts "
-            "the unproven license, provenance, and quality risk"
-        ),
-    )
-    import_catalog.add_argument(
-        "--risk-note",
-        help="Plain-language note explaining why the owner accepted the risk",
-    )
     import_catalog.set_defaults(handler=_import_catalog)
 
     inspect = commands.add_parser("inspect", help="Inspect imported Real Catalog records")
@@ -3020,6 +3610,14 @@ def _parser() -> argparse.ArgumentParser:
     generate_scale_test.add_argument("--records", type=int, default=10_000)
     generate_scale_test.add_argument("--seed", type=int, default=20260624)
     generate_scale_test.set_defaults(handler=_generate_scale_test_catalog)
+
+    import_parfumo_real = commands.add_parser(
+        "import-parfumo",
+        help="Import the TidyTuesday Parfumo CSV as the Real Catalog",
+    )
+    import_parfumo_real.add_argument("--source", required=True)
+    import_parfumo_real.add_argument("--database", required=True)
+    import_parfumo_real.set_defaults(handler=_import_parfumo_real_catalog)
 
     benchmark_scale_test = commands.add_parser(
         "benchmark-scale-test-catalog",

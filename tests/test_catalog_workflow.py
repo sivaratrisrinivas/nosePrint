@@ -1805,6 +1805,145 @@ class CatalogWorkflowTests(unittest.TestCase):
             self.assertEqual(json.loads(browsed.stdout)["status"], "no_matches")
             self.assertEqual(json.loads(browsed.stdout)["results"], [])
 
+    def test_tidy_tuesday_parfumo_csv_imports_as_real_catalog(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            source = workspace / "parfumo_data_clean.csv"
+            database = workspace / "catalog.sqlite3"
+            source.write_text(
+                "Number,Name,Brand,Release_Year,Concentration,Rating_Value,"
+                "Rating_Count,Main_Accords,Top_Notes,Middle_Notes,Base_Notes,"
+                "Perfumers,URL\n"
+                '0071,Tidal Pool,CB I Hate Perfume,2004,,7.4,19,'
+                '"Fresh, Aquatic",Bergamot,French lavender,"Musk, Foulness",'
+                "Harry Fremont,https://www.parfumo.com/Perfumes/CB/Tidal_Pool\n"
+                '0071,Tidal Pool,CB I Hate Perfume,2004,,7.4,19,'
+                '"Fresh, Aquatic",Bergamot,French lavender,"Musk, Foulness",'
+                "Harry Fremont,https://www.parfumo.com/Perfumes/CB/Tidal_Pool\n"
+                "0162,Wet Stone,CB I Hate Perfume,2006,,,,,,,,,"
+                "https://www.parfumo.com/Perfumes/CB/Wet_Stone\n",
+                encoding="utf-8",
+            )
+
+            imported = self.run_catalog(
+                "import-parfumo",
+                "--source",
+                str(source),
+                "--database",
+                str(database),
+            )
+            browsed = self.run_catalog(
+                "browse",
+                "--database",
+                str(database),
+                "--query",
+                "Tidal Pool",
+            )
+
+            self.assertEqual(imported.returncode, 0, imported.stderr)
+            self.assertEqual(
+                json.loads(imported.stdout),
+                {
+                    "status": "imported",
+                    "real_catalog": {
+                        "dataset_id": "tidytuesday-parfumo-2024-12-10",
+                        "source": str(source),
+                        "catalog_kind": "real",
+                        "accepted": 1,
+                        "duplicates": 1,
+                        "quarantined": 1,
+                        "rejected": 0,
+                        "catalog_notice": (
+                            "TidyTuesday Parfumo records are the NosePrint Real Catalog."
+                        ),
+                    },
+                },
+            )
+            self.assertEqual(
+                self.real_catalog_snapshot(database),
+                [
+                    {
+                        "id": 1,
+                        "fragrance": "Tidal Pool",
+                        "brand": "CB I Hate Perfume",
+                        "edition": "Tidal Pool",
+                        "concentration": None,
+                        "catalog_kind": "real",
+                        "notes_json": json.dumps(
+                            ["bergamot", "foulness", "french lavender", "musk"]
+                        ),
+                        "main_accords_json": json.dumps(["aquatic", "fresh"]),
+                        "top_notes_json": json.dumps(["bergamot"]),
+                        "middle_notes_json": json.dumps(["french lavender"]),
+                        "base_notes_json": json.dumps(["foulness", "musk"]),
+                        "scent_family": "fresh",
+                    }
+                ],
+            )
+            self.assertEqual(browsed.returncode, 0, browsed.stderr)
+            self.assertEqual(json.loads(browsed.stdout)["status"], "ok")
+            self.assertEqual(
+                json.loads(browsed.stdout)["results"],
+                [
+                    {
+                        "fragrance_edition_id": 1,
+                        "fragrance": "Tidal Pool",
+                        "edition": "Tidal Pool",
+                        "concentration": None,
+                    }
+                ],
+            )
+
+    def test_run_command_prepares_parfumo_real_catalog_and_index(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            source = workspace / "parfumo_data_clean.csv"
+            database = workspace / "catalog.sqlite3"
+            index = workspace / "qdrant-index.json"
+            source.write_text(
+                "Number,Name,Brand,Release_Year,Concentration,Rating_Value,"
+                "Rating_Count,Main_Accords,Top_Notes,Middle_Notes,Base_Notes,"
+                "Perfumers,URL\n"
+                '0001,Tidal Pool,CB I Hate Perfume,2004,,7.4,19,'
+                '"Fresh, Aquatic",Bergamot,French lavender,"Musk, Foulness",'
+                "Harry Fremont,https://www.parfumo.com/Perfumes/CB/Tidal_Pool\n",
+                encoding="utf-8",
+            )
+
+            prepared = self.run_catalog(
+                "run",
+                "--source",
+                str(source),
+                "--database",
+                str(database),
+                "--index",
+                str(index),
+                "--port",
+                "0",
+                "--prepare-only",
+            )
+
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            self.assertEqual(
+                json.loads(prepared.stdout),
+                {
+                    "status": "prepared",
+                    "app": {
+                        "url": "http://127.0.0.1:0/",
+                        "database": str(database),
+                        "index": str(index),
+                        "real_catalog_records": 1,
+                    },
+                },
+            )
+            self.assertTrue(index.exists())
+            self.assertEqual(
+                json.loads(index.read_text(encoding="utf-8"))["metadata"]["points"],
+                1,
+            )
+
     def test_scale_test_benchmark_uses_separate_ann_path_and_reports_recall(
         self,
     ) -> None:
@@ -2285,7 +2424,7 @@ class CatalogWorkflowTests(unittest.TestCase):
                 json.dumps(
                     {
                         "dataset": {
-                            "id": "candidate-perfume-recommendation-v1",
+                            "id": "blocked-real-catalog-candidate-v1",
                             "download_url": "https://example.test/candidate.csv",
                             "publisher": "Example Publisher",
                             "claimed_license": "CC0: Public Domain",
@@ -2348,81 +2487,6 @@ class CatalogWorkflowTests(unittest.TestCase):
             self.assertIn("Import blocked", imported.stderr)
             self.assertEqual(bypass_attempt.returncode, 2, bypass_attempt.stderr)
             self.assertFalse(database.exists())
-
-    def test_owner_can_explicitly_accept_inconclusive_risk_without_tampering_audit(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            workspace = Path(temporary_directory)
-            source = workspace / "candidate.csv"
-            source.write_text(
-                "Name,Brand,Description,Notes,Image URL\n"
-                "Example,Example Brand,A description,Cedar,https://example.test/image.jpg\n",
-                encoding="utf-8",
-            )
-            manifest = workspace / "audit.json"
-            manifest.write_text(
-                json.dumps(
-                    {
-                        "dataset": {
-                            "id": "owner-accepted-candidate-v1",
-                            "download_url": "https://example.test/candidate.csv",
-                            "publisher": "Example Publisher",
-                            "claimed_license": "CC0: Public Domain",
-                            "license_evidence": ["https://example.test/license"],
-                            "license_chain_status": "inconclusive",
-                            "provenance_evidence": [],
-                            "provenance_status": "inconclusive",
-                            "expected_schema": [
-                                "Name",
-                                "Brand",
-                                "Description",
-                                "Notes",
-                                "Image URL",
-                            ],
-                            "expected_row_count": 1,
-                            "quality_status": "inconclusive",
-                            "quality_risks": ["Original source is not identified."],
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-            report = workspace / "audit-report.json"
-            database = workspace / "catalog.sqlite3"
-
-            audit = self.run_catalog(
-                "audit",
-                "--manifest",
-                str(manifest),
-                "--source",
-                str(source),
-                "--report",
-                str(report),
-            )
-            imported = self.run_catalog(
-                "import",
-                "--audit-report",
-                str(report),
-                "--source",
-                str(source),
-                "--database",
-                str(database),
-                "--accept-owner-risk",
-                "--risk-note",
-                "Personal side project: accept inconclusive CC0/provenance risk.",
-            )
-            inspected = self.run_catalog("inspect", "--database", str(database))
-
-            self.assertEqual(audit.returncode, 2, audit.stderr)
-            self.assertEqual(json.loads(report.read_text())["verdict"], "inconclusive")
-            self.assertEqual(imported.returncode, 0, imported.stderr)
-            self.assertEqual(json.loads(imported.stdout)["accepted"], 1)
-            self.assertEqual(inspected.returncode, 0, inspected.stderr)
-            self.assertEqual(
-                json.loads(inspected.stdout)[0]["source_dataset"],
-                "owner-accepted-candidate-v1",
-            )
 
     def test_passing_audit_imports_traceable_real_catalog_record_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -3114,6 +3178,13 @@ class CatalogWorkflowTests(unittest.TestCase):
             return [dict(row) for row in rows]
         finally:
             connection.close()
+
+    def real_catalog_snapshot(self, database: Path) -> list[dict[str, object]]:
+        return [
+            row
+            for row in self.scale_test_catalog_snapshot(database)
+            if row["catalog_kind"] == "real"
+        ]
 
 
 if __name__ == "__main__":

@@ -1,38 +1,58 @@
-# Audit and import a Real Catalog source
+# Run and import the Real Catalog
 
-NosePrint uses one public workflow for catalog construction. Python 3's standard library is sufficient; no package installation is required.
+NosePrint uses one public app workflow. Python 3's standard library is
+sufficient; no package installation is required.
 
-## Audit a candidate
+## Run the application
 
-Download a candidate through its authorized source, keep it outside the repository, and run:
+Download `parfumo_data_clean.csv` outside the repository, then run:
 
 ```bash
-python3 -m noseprint.catalog audit \
-  --manifest data/audits/perfume-recommendation-dataset-v1.json \
-  --source /path/to/candidate.csv \
-  --report /tmp/noseprint-audit-report.json
+python3 -m noseprint.catalog run \
+  --source /tmp/parfumo_data_clean.csv
 ```
 
-Exit code `0` means every declared license-chain, provenance, schema, row-count, and quality check passed. Exit code `2` means the verdict is inconclusive and import is blocked. The current candidate manifest intentionally returns `2` even if the claimed schema and row count match, because its provenance and license chain are inconclusive.
+The command imports Parfumo as the Real Catalog, writes SQLite data to
+`var/noseprint.sqlite3`, rebuilds `var/qdrant-index.json`, and starts the local
+UI at `http://127.0.0.1:8000/`.
 
-## Import an explicitly passing source
+On later runs, omit `--source` to reuse the existing local catalog:
 
 ```bash
-python3 -m noseprint.catalog import \
-  --audit-report /tmp/noseprint-audit-report.json \
-  --source /path/to/the-same-candidate.csv \
+python3 -m noseprint.catalog run
+```
+
+Use `--database`, `--index`, `--host`, or `--port` only when a different local
+path or bind address is needed.
+
+## Import Parfumo without serving the UI
+
+```bash
+python3 -m noseprint.catalog import-parfumo \
+  --source /tmp/parfumo_data_clean.csv \
   --database var/noseprint.sqlite3
 ```
 
-The source SHA-256 must match the audited file. Accepted rows become separate Fragrance and Fragrance Edition records in SQLite. Original source values remain attached to the normalized Scent Profile. Missing required identity fields are rejected, rows without notes are quarantined, and duplicate Fragrance Editions are skipped deterministically.
+The importer expects the cleaned TidyTuesday columns:
 
-The command reports `accepted`, `rejected`, `transformed`, `duplicates`, and `quarantined` counts. Re-running the same import does not duplicate catalog records.
+```text
+Number,Name,Brand,Release_Year,Concentration,Rating_Value,Rating_Count,Main_Accords,Top_Notes,Middle_Notes,Base_Notes,Perfumers,URL
+```
 
-## Import a manually curated seed Real Catalog
+Accepted rows become `real` Fragrance Editions. The importer normalizes main
+accords and top, middle, and base notes into Scent Profiles, uses the first
+listed main accord as the scent family, quarantines rows with no usable Scent
+Profile facts, rejects malformed or identity-less rows, and skips duplicate
+brand/name/concentration rows deterministically.
 
-For shopper-facing quality, prefer a small manually reviewed seed Real Catalog
-over the current low-detail prototype dataset. See
-[`docs/curated-real-catalog.md`](curated-real-catalog.md) for the source policy.
+Running this command replaces the current Real Catalog so Parfumo remains the
+only catalog used by the app.
+
+## Historical audited imports
+
+The older `audit` and `import` commands remain available for tests and learning
+the original source-gating workflow, but the current product path is Parfumo via
+`run` or `import-parfumo`.
 
 ## Review a Curated Batch before Real Catalog import
 
@@ -137,21 +157,6 @@ rejected. Duplicate Fragrance Editions are skipped deterministically.
 identity and Scent Profile source URLs. Do not copy marketing prose or images
 into the curated seed unless their reuse rights are separately verified.
 
-## Import after the owner accepts an inconclusive risk
-
-For a personal side project, you may decide to use a source even when the audit is inconclusive. Do not change the audit verdict to `passed`. Keep the truth visible and import with an explicit owner-risk note:
-
-```bash
-python3 -m noseprint.catalog import \
-  --audit-report /tmp/noseprint-audit-report.json \
-  --source /path/to/the-same-candidate.csv \
-  --database var/noseprint.sqlite3 \
-  --accept-owner-risk \
-  --risk-note "Personal side project: accept inconclusive CC0/provenance risk."
-```
-
-This still checks that the source file matches the audited file and that the schema and row count match the manifest. The database records that the project owner accepted the risk, so the data is usable without pretending the audit proved more than it did.
-
 ## Inspect the result
 
 ```bash
@@ -173,8 +178,7 @@ python3 -m noseprint.catalog browse \
 
 The response lists matching Real Catalog Fragrance Editions separately. For
 example, an EDT and EDP can appear as distinct results with different
-`fragrance_edition_id` values. Scale-Test Catalog records are not returned by
-this shopping path.
+`fragrance_edition_id` values.
 
 If no Fragrance name matches, the command returns `status: "no_matches"` with a
 plain-language message. If the database has not been imported yet, the command
@@ -206,8 +210,7 @@ python3 -m noseprint.catalog scent-matches \
 ```
 
 The command returns ranked Real Catalog alternatives and excludes the selected
-edition from its own result list. It also excludes Scale-Test Catalog rows from
-this shopper path, even if those rows exist in SQLite.
+edition from its own result list.
 
 Each Scent Match includes:
 
@@ -419,8 +422,7 @@ with only this retrieval payload:
 - `fragrance_edition_id`
 - `catalog_kind`
 
-Scale-Test Catalog records are not written to the normal shopping index. If
-SQLite catalog facts, the embedding model, the model version, the serialization
+If SQLite catalog facts, the embedding model, the model version, the serialization
 pipeline, dimensions, or the index schema change, health reports the index as
 stale and tells the user to rebuild.
 
@@ -481,54 +483,3 @@ Reference Match Set JSON is evaluation data only. It is kept separate from Real
 Catalog source imports, Scent Profile embeddings, training data, and user
 activity. Running the evaluator does not create Fragrances or Fragrance
 Editions and does not change shopper browse results.
-
-## Generate a Scale-Test Catalog
-
-Use the Scale-Test Catalog when you need performance data at a larger size than
-the provenance-checked Real Catalog can safely provide:
-
-```bash
-python3 -m noseprint.catalog generate-scale-test-catalog \
-  --database var/noseprint.sqlite3 \
-  --records 10000 \
-  --seed 20260624
-```
-
-The generator is deterministic: the same seed and record count produce the same
-generated Fragrance Editions on repeated runs. Each generated row is stored in
-SQLite with `catalog_kind: "scale-test"` and a generated source id of
-`scale-test-catalog-v1`. These rows are benchmark material only. They are not
-Real Catalog records, purchasable inventory, training data, Reference Match Set
-quality data, or user activity.
-
-Normal shopper workflows keep filtering below presentation code with
-`catalog_kind = 'real'`. That includes browsing, selected-edition Scent Matches,
-Scent Request search, Comparable Price filtering, and Wear Profile filtering.
-
-## Benchmark the Scale-Test Catalog
-
-Run Scale-Test performance measurements through the explicit benchmark path:
-
-```bash
-python3 -m noseprint.catalog benchmark-scale-test-catalog \
-  --database var/noseprint.sqlite3 \
-  --index var/scale-test-qdrant-index.json \
-  --reference-edition-id 1000001 \
-  --limit 10
-```
-
-The benchmark command reads only `scale-test` rows, writes a separate
-`qdrant-scale-test-index-v1` index, and reports:
-
-- catalog size
-- exact-cosine configuration
-- Qdrant ANN configuration
-- recall-at-k
-- embedding latency
-- retrieval latency
-- hydration latency
-
-The normal shopping Qdrant index continues to use the `qdrant-index-v1` schema
-and Real Catalog payloads. Shopper ANN search rejects malformed points whose
-point id, payload `fragrance_edition_id`, payload `catalog_kind`, and SQLite
-Real Catalog row do not agree.
