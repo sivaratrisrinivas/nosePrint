@@ -5,9 +5,20 @@ __pycache__/
 *.pem
 *.key
 var/
+*.sqlite3
+*.sqlite3-*
+qdrant-index.json
+scale-test-qdrant-index.json
+parfumo_data_clean.csv
+curated-batch.csv
+audit-manifest.json
+audit-report.json
 
 # Local learning artifacts are for the teaching session, not issue commits.
 learning-sessions/
 learning-records/
 lessons/
 reference/
+RESOURCES.md
+MISSION.md
+NOTES.md
