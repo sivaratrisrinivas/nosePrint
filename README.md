@@ -79,6 +79,11 @@ Scent Matches are opt-in because matching over the full Real Catalog can be
 slower than loading the selected Scent Profile. The UI keeps those actions
 separate so the profile appears first and matching does not surprise the user.
 
+To keep the button snappy, the browser app builds an in-memory Scent Profile
+token cache when it starts. The `Find matches` action then prefilters likely
+candidates by shared scent tokens and ranks that smaller group, while the CLI
+still keeps the heavier exact and Qdrant-style paths for evaluation.
+
 The app also serves its local logo asset from `assets/noseprint-logo.png`.
 
 ## Vector Database Primitives Learned
@@ -108,6 +113,9 @@ NosePrint uses a tiny local version of the ideas behind a vector database:
   check whether the fast path missed expected results.
 - **Freshness check**: the index stores a fingerprint of the SQLite catalog, so
   NosePrint can tell when the index needs to be rebuilt.
+- **UI cache**: the browser app keeps a temporary in-memory token index so
+  repeated `Find matches` clicks do not reread and rerank the full catalog from
+  scratch.
 
 When you run:
 

@@ -13,6 +13,7 @@ import re
 import sqlite3
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import parse_qs, urlparse
@@ -1665,6 +1666,11 @@ def _scent_match_result(
             "Exact cosine over NosePrint Scent Profile embeddings; "
             "not a probability or percent-identical claim."
         )
+    elif method == "prefiltered_token_cosine":
+        score_basis = (
+            "Prefiltered cosine over NosePrint Scent Profile tokens for the browser UI; "
+            "not a probability or percent-identical claim."
+        )
     else:
         score_basis = (
             "Qdrant ANN retrieval over NosePrint Scent Profile embeddings, "
@@ -3131,7 +3137,115 @@ def _app_status(database: Path) -> dict[str, Any]:
     }
 
 
+def _app_scent_matches_response(
+    database: Path, edition_id: int, limit: int, cache: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    match_cache = cache if cache is not None else _build_app_scent_match_cache(database)
+    reference_entry = match_cache["by_id"].get(edition_id)
+    if reference_entry is None:
+        return {
+            "status": "not_found",
+            "message": "No Real Catalog Fragrance Edition is available for that edition id.",
+        }
+
+    reference = reference_entry["row"]
+    reference_tokens = reference_entry["tokens"]
+    ranked_candidates = []
+    for candidate_entry in _app_scent_match_candidate_entries(match_cache, reference_entry):
+        row = candidate_entry["row"]
+        score = _token_cosine_similarity(reference_tokens, candidate_entry["tokens"])
+        ranked_candidates.append((score, row))
+    ranked_candidates.sort(
+        key=lambda candidate: (
+            -round(candidate[0], 2),
+            candidate[1]["fragrance"],
+            candidate[1]["edition"],
+            candidate[1]["fragrance_edition_id"],
+        )
+    )
+    limited_matches = [
+        _scent_match_result(reference, row, score, method="prefiltered_token_cosine")
+        for score, row in ranked_candidates[:limit]
+    ]
+    return {
+        "status": "ok" if limited_matches else "no_matches",
+        "reference": {
+            "fragrance_edition_id": reference["fragrance_edition_id"],
+            "fragrance": reference["fragrance"],
+            "edition": reference["edition"],
+            "concentration": reference["concentration"],
+        },
+        "embedding": _embedding_metadata(),
+        "retrieval": {
+            "method": "prefiltered_token_cosine",
+            "candidate_count": len(ranked_candidates),
+            "scoring_latency_ms": round((time.perf_counter() - started_at) * 1000),
+        },
+        "results": limited_matches,
+    }
+
+
+def _token_cosine_similarity(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / math.sqrt(len(left) * len(right))
+
+
+def _build_app_scent_match_cache(database: Path) -> dict[str, Any]:
+    connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = _real_catalog_scent_profile_rows(connection)
+    finally:
+        connection.close()
+    entries = []
+    by_id = {}
+    token_index: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        tokens = set(_serialize_scent_profile(row))
+        entry = {
+            "row": row,
+            "tokens": tokens,
+            "note_tokens": {token for token in tokens if token.startswith("notes:")},
+            "trait_tokens": {
+                token
+                for token in tokens
+                if token.startswith("main_accord:")
+                or token.startswith("scent_family:")
+            },
+        }
+        entries.append(entry)
+        by_id[row["fragrance_edition_id"]] = entry
+        for token in tokens:
+            token_index.setdefault(token, []).append(entry)
+    return {"entries": entries, "by_id": by_id, "token_index": token_index}
+
+
+def _app_scent_match_candidate_entries(
+    cache: dict[str, Any], reference_entry: dict[str, Any]
+) -> list[dict[str, Any]]:
+    candidate_tokens = reference_entry["note_tokens"] or reference_entry["trait_tokens"]
+    if not candidate_tokens:
+        return [
+            entry
+            for entry in cache["entries"]
+            if entry["row"]["fragrance_edition_id"]
+            != reference_entry["row"]["fragrance_edition_id"]
+        ]
+
+    candidates_by_id = {}
+    for token in candidate_tokens:
+        for entry in cache["token_index"].get(token, []):
+            entry_id = entry["row"]["fragrance_edition_id"]
+            if entry_id != reference_entry["row"]["fragrance_edition_id"]:
+                candidates_by_id[entry_id] = entry
+    return list(candidates_by_id.values())
+
+
 def _make_app_handler(database: Path, index: Path) -> type[BaseHTTPRequestHandler]:
+    scent_match_cache = _build_app_scent_match_cache(database)
+
     class NosePrintAppHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -3165,19 +3279,11 @@ def _make_app_handler(database: Path, index: Path) -> type[BaseHTTPRequestHandle
                     )
                 elif parsed.path == "/api/matches":
                     self._send_json(
-                        _json_response_from_handler(
-                            _scent_matches,
-                            argparse.Namespace(
-                                database=str(database),
-                                index=str(index) if index.exists() else None,
-                                edition_id=int(query.get("id", ["0"])[0]),
-                                limit=int(query.get("limit", ["5"])[0]),
-                                show_prices=False,
-                                cheaper_only=False,
-                                show_wear_profiles=False,
-                                wear_longevity=None,
-                                wear_projection=None,
-                            ),
+                        _app_scent_matches_response(
+                            database,
+                            edition_id=int(query.get("id", ["0"])[0]),
+                            limit=int(query.get("limit", ["5"])[0]),
+                            cache=scent_match_cache,
                         )
                     )
                 else:
