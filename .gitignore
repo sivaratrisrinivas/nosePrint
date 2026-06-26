@@ -14,6 +14,10 @@ curated-batch.csv
 audit-manifest.json
 audit-report.json
 
+# Generated project assets are ignored by default; keep shipped UI assets explicit.
+assets/*
+!assets/noseprint-logo.png
+
 # Local learning artifacts are for the teaching session, not issue commits.
 learning-sessions/
 learning-records/

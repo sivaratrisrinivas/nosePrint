@@ -2413,112 +2413,491 @@ APP_HTML = """<!doctype html>
   <style>
     :root {
       color-scheme: light;
-      --bg: #f7f5f0;
-      --panel: #ffffff;
-      --text: #20201d;
-      --muted: #65635c;
-      --line: #d9d5cb;
-      --accent: #2f6f68;
-      --accent-strong: #174d47;
+      --page: #f4f7f5;
+      --surface: #fffffd;
+      --text: #171a18;
+      --muted: #69716d;
+      --line: #d8e0dc;
+      --line-strong: #b7c6bf;
+      --ink: #20342f;
+      --accent: #3f7467;
+      --copper: #9a6738;
+      --rose: #9f5962;
       --warn: #8a4b16;
+      --shadow: 0 24px 80px rgba(26, 43, 38, 0.11);
     }
     * { box-sizing: border-box; }
+    html { min-height: 100%; background: var(--page); }
     body {
+      min-height: 100%;
       margin: 0;
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: var(--bg);
+      font-family: "Avenir Next", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.92), rgba(244, 247, 245, 0) 44%), var(--page);
       color: var(--text);
       letter-spacing: 0;
     }
-    main { width: min(1120px, calc(100vw - 32px)); margin: 0 auto; padding: 28px 0 40px; }
-    header {
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: not-allowed; opacity: 0.42; }
+    button:focus-visible, input:focus-visible {
+      outline: 3px solid rgba(63, 116, 103, 0.24);
+      outline-offset: 3px;
+    }
+    h1, h2, h3, p { margin: 0; }
+    .shell {
+      width: min(1080px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 22px 0 34px;
+    }
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 24px;
+      align-items: center;
+      padding: 4px 2px 18px;
+    }
+    .brand {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      min-width: 0;
+    }
+    .logo {
+      width: 52px;
+      height: 52px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--surface);
+      object-fit: cover;
+      box-shadow: 0 12px 28px rgba(31, 47, 42, 0.1);
+      flex: 0 0 auto;
+    }
+    h1 {
+      font-size: clamp(28px, 5vw, 48px);
+      line-height: 1;
+      font-weight: 560;
+      letter-spacing: 0;
+    }
+    .status {
+      display: grid;
+      gap: 2px;
+      justify-items: end;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .status strong {
+      color: var(--text);
+      font-size: 22px;
+      font-weight: 560;
+    }
+    .stage-dots {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      margin-bottom: 14px;
+      padding: 0 2px;
+    }
+    .stage-dot {
+      height: 3px;
+      border-radius: 999px;
+      background: var(--line);
+    }
+    .stage-dot.active { background: var(--accent); }
+    .workspace, .screen { min-height: min(680px, calc(100vh - 142px)); }
+    .workspace {
+      position: relative;
+      display: grid;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 253, 0.92);
+      box-shadow: var(--shadow);
+    }
+    .screen {
+      display: none;
+      align-content: center;
+      justify-items: center;
+      gap: 22px;
+      padding: clamp(22px, 5vw, 56px);
+    }
+    .screen.active { display: grid; }
+    .screen-inner {
+      display: grid;
+      gap: 20px;
+      width: min(680px, 100%);
+    }
+    .screen-inner.wide { width: min(840px, 100%); }
+    .screen-head { display: grid; gap: 8px; }
+    .eyebrow {
+      color: var(--copper);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    h2 {
+      font-size: clamp(31px, 6vw, 62px);
+      line-height: 0.96;
+      font-weight: 520;
+      letter-spacing: 0;
+    }
+    .compact-title {
+      font-size: clamp(28px, 5vw, 48px);
+      line-height: 1;
+    }
+    .small-title {
+      font-size: 20px;
+      line-height: 1.15;
+      font-weight: 700;
+    }
+    .subtle {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .search-form { display: grid; gap: 10px; }
+    label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .search-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+    }
+    input {
+      width: 100%;
+      min-width: 0;
+      height: 54px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--text);
+      padding: 0 14px;
+      font-size: 18px;
+      box-shadow: inset 0 1px 2px rgba(35, 31, 22, 0.04);
+    }
+    .primary, .secondary, .text-button {
+      min-height: 46px;
+      border-radius: 8px;
+      border: 1px solid;
+      padding: 0 16px;
+      font-weight: 800;
+    }
+    .primary {
+      background: var(--ink);
+      border-color: var(--ink);
+      color: #fffffd;
+    }
+    .secondary {
+      background: rgba(255, 255, 255, 0.7);
+      border-color: var(--line-strong);
+      color: var(--ink);
+    }
+    .text-button {
+      justify-self: start;
+      min-height: 38px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+    }
+    .list { display: grid; gap: 8px; }
+    .result {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: center;
+      min-height: 78px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.58);
+      color: var(--text);
+      padding: 12px;
+      text-align: left;
+      transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+    }
+    .result:hover {
+      background: var(--surface);
+      border-color: var(--accent);
+      box-shadow: 0 8px 22px rgba(48, 76, 69, 0.08);
+    }
+    .result-title, .match-title {
+      display: block;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+    .meta {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .result-id {
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .pager {
       display: flex;
       justify-content: space-between;
-      gap: 16px;
-      align-items: end;
-      border-bottom: 1px solid var(--line);
-      padding-bottom: 16px;
+      align-items: center;
+      gap: 10px;
     }
-    h1 { margin: 0; font-size: 28px; line-height: 1.1; }
-    h2 { margin: 0 0 12px; font-size: 16px; }
-    p { margin: 0; color: var(--muted); line-height: 1.45; }
-    .status { font-size: 13px; color: var(--muted); text-align: right; }
-    .grid { display: grid; grid-template-columns: 320px 1fr; gap: 20px; margin-top: 20px; align-items: start; }
-    section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; }
-    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 8px; }
-    .search-row { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
-    .pager { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 12px; }
-    .pager-status { color: var(--muted); font-size: 12px; }
-    input, button { min-height: 40px; border-radius: 6px; border: 1px solid var(--line); font: inherit; }
-    input { width: 100%; padding: 0 10px; background: #fff; color: var(--text); }
-    button { padding: 0 12px; background: var(--accent); color: white; border-color: var(--accent); cursor: pointer; }
-    button:disabled { cursor: not-allowed; opacity: 0.45; }
-    button.secondary { background: #fff; color: var(--accent-strong); border-color: var(--line); }
-    button:focus, input:focus { outline: 3px solid rgba(47, 111, 104, 0.25); outline-offset: 2px; }
-    .list { display: grid; gap: 8px; margin-top: 14px; }
-    .result { width: 100%; display: block; text-align: left; background: #fff; color: var(--text); border-color: var(--line); padding: 10px; min-height: 0; }
-    .result strong, .match strong { display: block; font-size: 14px; }
-    .meta { color: var(--muted); font-size: 12px; margin-top: 3px; }
-    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .facts { display: grid; gap: 10px; }
-    .fact span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 3px; }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12px; background: #fbfaf7; }
-    .matches { display: grid; gap: 10px; }
-    .match { border-top: 1px solid var(--line); padding-top: 10px; }
-    .score { color: var(--accent-strong); font-size: 12px; margin-top: 4px; }
-    .empty { color: var(--muted); padding: 12px 0; }
+    .pager-status {
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+    .empty {
+      display: grid;
+      place-items: center;
+      min-height: 160px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 8px;
+      color: var(--muted);
+      padding: 22px;
+      text-align: center;
+      line-height: 1.45;
+    }
     .warning { color: var(--warn); }
-    @media (max-width: 760px) {
-      header { align-items: start; flex-direction: column; }
-      .status { text-align: left; }
-      .grid, .detail-grid { grid-template-columns: 1fr; }
+    .profile-shell { display: grid; gap: 18px; }
+    .profile-head { display: grid; gap: 10px; }
+    .family-medallion {
+      width: fit-content;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--accent);
+      padding: 8px 10px;
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: capitalize;
+    }
+    .section-title {
+      margin-bottom: 12px;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .accords {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      max-width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--ink);
+      padding: 5px 10px;
+      font-size: 12px;
+      line-height: 1.2;
+      overflow-wrap: anywhere;
+      text-transform: capitalize;
+    }
+    .chip.unknown {
+      color: var(--muted);
+      background: transparent;
+      border-style: dashed;
+      text-transform: none;
+    }
+    .pyramid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.62);
+    }
+    .note-column {
+      min-width: 0;
+      padding: 16px;
+      border-right: 1px solid var(--line);
+    }
+    .note-column:last-child { border-right: 0; }
+    .note-column h3 {
+      color: var(--rose);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+    .note-column .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin-top: 12px;
+    }
+    .matches { display: grid; gap: 8px; }
+    .match {
+      display: grid;
+      gap: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.58);
+      padding: 14px;
+    }
+    .score-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .score-track {
+      height: 5px;
+      border-radius: 999px;
+      background: #e4ebe8;
+      overflow: hidden;
+    }
+    .score-fill {
+      height: 100%;
+      width: var(--score-width);
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--accent), var(--copper));
+    }
+    .score {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: capitalize;
+      white-space: nowrap;
+    }
+    .loading {
+      position: relative;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.48);
+    }
+    .loading::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      transform: translateX(-100%);
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.68), transparent);
+      animation: sweep 1.3s infinite;
+    }
+    @keyframes sweep { to { transform: translateX(100%); } }
+    @media (max-width: 640px) {
+      .shell { width: min(100vw - 20px, 520px); padding: 12px 0; }
+      .topbar { grid-template-columns: 1fr; align-items: start; }
+      .logo { width: 44px; height: 44px; }
+      .status { justify-items: start; white-space: normal; }
+      .workspace, .screen { min-height: calc(100vh - 150px); }
+      .screen { align-content: start; padding: 20px; }
+      .search-row { grid-template-columns: 1fr; }
+      .pyramid { grid-template-columns: 1fr; }
+      .note-column { border-right: 0; border-bottom: 1px solid var(--line); }
+      .note-column:last-child { border-bottom: 0; }
     }
   </style>
 </head>
 <body>
-  <main>
-    <header>
-      <div>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <img class="logo" src="/assets/noseprint-logo.png" alt="" aria-hidden="true">
         <h1>NosePrint</h1>
-        <p>Search the Parfumo Real Catalog and compare Fragrance Editions by Scent Profile.</p>
       </div>
-      <div class="status" id="catalog-status">Loading catalog...</div>
+      <div class="status" id="catalog-status" aria-live="polite">
+        <span>Real Catalog</span>
+        <strong>Loading</strong>
+      </div>
     </header>
-    <div class="grid">
-      <section aria-labelledby="search-title">
-        <h2 id="search-title">Find a Fragrance</h2>
-        <form id="search-form">
-          <label for="query">Fragrance name</label>
-          <div class="search-row">
-            <input id="query" name="query" type="search" value="rose" autocomplete="off">
-            <button type="submit">Search</button>
+    <div class="stage-dots" aria-hidden="true">
+      <div class="stage-dot active" data-stage-dot="search"></div>
+      <div class="stage-dot" data-stage-dot="results"></div>
+      <div class="stage-dot" data-stage-dot="profile"></div>
+      <div class="stage-dot" data-stage-dot="matches"></div>
+    </div>
+    <div class="workspace">
+      <section class="screen active" id="screen-search" aria-labelledby="search-title">
+        <div class="screen-inner">
+          <div class="screen-head">
+            <div class="eyebrow">Start</div>
+            <h2 id="search-title">Name the Fragrance.</h2>
           </div>
-        </form>
-        <div class="list" id="results" role="list"></div>
-        <div class="pager" id="pager" hidden>
-          <button class="secondary" id="previous-page" type="button">Previous</button>
-          <div class="pager-status" id="pager-status"></div>
-          <button class="secondary" id="next-page" type="button">Next</button>
+          <form class="search-form" id="search-form">
+            <label for="query">Fragrance name</label>
+            <div class="search-row">
+              <input id="query" name="query" type="search" value="rose" autocomplete="off">
+              <button class="primary" type="submit">Search</button>
+            </div>
+          </form>
         </div>
       </section>
-      <section aria-labelledby="profile-title">
-        <h2 id="profile-title">Selected Fragrance Edition</h2>
-        <div id="profile" class="empty">Choose a search result to inspect its Scent Profile.</div>
+      <section class="screen" id="screen-results" aria-labelledby="results-title">
+        <div class="screen-inner wide">
+          <div class="eyebrow">Real Catalog</div>
+          <h2 class="compact-title" id="results-title">Choose one result.</h2>
+          <div class="subtle" id="results-meta" aria-live="polite"></div>
+          <div class="list" id="results" role="listbox" aria-label="Search results"></div>
+          <div class="pager" id="pager" hidden>
+            <button class="secondary" id="previous-page" type="button">Previous</button>
+            <div class="pager-status" id="pager-status"></div>
+            <button class="secondary" id="next-page" type="button">Next</button>
+          </div>
+          <button class="text-button" id="change-search" type="button">Change search</button>
+        </div>
+      </section>
+      <section class="screen" id="screen-profile" aria-labelledby="profile-title">
+        <div class="screen-inner wide" id="profile">
+          <div class="empty">
+            <div>
+              <div class="eyebrow">Scent Profile</div>
+              <h2 class="small-title" id="profile-title">Choose a Fragrance Edition</h2>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="screen" id="screen-matches" aria-labelledby="matches-title">
+        <div class="screen-inner wide">
+          <div class="screen-head">
+            <div class="eyebrow">Scent Matches</div>
+            <h2 class="compact-title" id="matches-title">Nearby choices.</h2>
+          </div>
+          <div class="matches" id="matches"></div>
+          <button class="text-button" id="back-to-profile" type="button">Back to profile</button>
+        </div>
       </section>
     </div>
   </main>
   <script>
     const statusEl = document.querySelector("#catalog-status");
     const resultsEl = document.querySelector("#results");
+    const resultsMetaEl = document.querySelector("#results-meta");
     const profileEl = document.querySelector("#profile");
+    const matchesEl = document.querySelector("#matches");
     const form = document.querySelector("#search-form");
     const queryInput = document.querySelector("#query");
     const pagerEl = document.querySelector("#pager");
     const pagerStatusEl = document.querySelector("#pager-status");
     const previousPageButton = document.querySelector("#previous-page");
     const nextPageButton = document.querySelector("#next-page");
+    const changeSearchButton = document.querySelector("#change-search");
+    const backToProfileButton = document.querySelector("#back-to-profile");
+    const screens = {
+      search: document.querySelector("#screen-search"),
+      results: document.querySelector("#screen-results"),
+      profile: document.querySelector("#screen-profile"),
+      matches: document.querySelector("#screen-matches")
+    };
     let currentPage = 1;
+    let selectedProfile = null;
+    let profileRequestId = 0;
+    let matchesRequestId = 0;
     const perPage = 10;
 
     function escapeHtml(value) {
@@ -2531,45 +2910,82 @@ APP_HTML = """<!doctype html>
       }[character]));
     }
 
-    function text(value) {
+    function showScreen(name) {
+      Object.entries(screens).forEach(([screenName, element]) => {
+        element.classList.toggle("active", screenName === name);
+      });
+      document.querySelectorAll("[data-stage-dot]").forEach(dot => {
+        dot.classList.toggle("active", dot.dataset.stageDot === name);
+      });
+    }
+
+    function normalizeList(value) {
+      if (Array.isArray(value) && value.length) return value;
+      if (value && value !== "unknown") return [value];
+      return ["unknown"];
+    }
+
+    function displayText(value) {
       if (Array.isArray(value)) return value.join(", ");
       return value || "unknown";
     }
 
+    function titleCase(value) {
+      return String(value || "unknown").replace(/\\b\\w/g, letter => letter.toUpperCase());
+    }
+
     function chips(value) {
-      const values = Array.isArray(value) && value.length ? value : ["unknown"];
-      return `<div class="chips">${values.map(item => `<span class="chip">${escapeHtml(item)}</span>`).join("")}</div>`;
+      return `<div class="chips">${normalizeList(value).map(item => {
+        const unknownClass = item === "unknown" ? " unknown" : "";
+        return `<span class="chip${unknownClass}">${escapeHtml(item)}</span>`;
+      }).join("")}</div>`;
+    }
+
+    function selectedEditionMeta(item) {
+      const concentration = item.concentration ? ` / ${item.concentration}` : "";
+      return `${item.fragrance}${concentration}`;
     }
 
     async function loadStatus() {
-      const response = await fetch("/api/status");
-      const data = await response.json();
-      statusEl.textContent = `${data.real_catalog_records.toLocaleString()} Real Catalog records`;
+      try {
+        const response = await fetch("/api/status");
+        const data = await response.json();
+        statusEl.innerHTML = `<span>Real Catalog</span><strong>${data.real_catalog_records.toLocaleString()}</strong>`;
+      } catch (error) {
+        statusEl.innerHTML = `<span class="warning">Catalog unavailable</span>`;
+      }
     }
 
     async function search(query, page = 1) {
       currentPage = page;
-      resultsEl.innerHTML = `<div class="empty">Searching...</div>`;
+      selectedProfile = null;
+      matchesEl.innerHTML = "";
+      resultsMetaEl.textContent = "";
+      resultsEl.innerHTML = `<div class="empty loading">Searching...</div>`;
       pagerEl.hidden = true;
+      showScreen("results");
       const response = await fetch(`/api/search?q=${encodeURIComponent(query)}&page=${page}&per_page=${perPage}`);
       const data = await response.json();
       if (!data.results.length) {
-        resultsEl.innerHTML = `<div class="empty">No matches.</div>`;
-        profileEl.innerHTML = `<div class="empty">Choose a search result to inspect its Scent Profile.</div>`;
+        resultsMetaEl.textContent = "No matches";
+        resultsEl.innerHTML = `<div class="empty">Try another Fragrance name.</div>`;
         renderPager(data.pagination);
         return;
       }
       resultsEl.innerHTML = data.results.map(result => `
-        <button class="result" type="button" data-id="${result.fragrance_edition_id}">
-          <strong>${escapeHtml(result.fragrance)}</strong>
-          <div class="meta">${escapeHtml(result.edition)}${result.concentration ? " &middot; " + escapeHtml(result.concentration) : ""}</div>
+        <button class="result" type="button" role="option" aria-selected="false" data-id="${result.fragrance_edition_id}">
+          <span>
+            <strong class="result-title">${escapeHtml(result.fragrance)}</strong>
+            <span class="meta">${escapeHtml(result.edition)}${result.concentration ? " / " + escapeHtml(result.concentration) : ""}</span>
+          </span>
+          <span class="result-id">#${escapeHtml(result.fragrance_edition_id)}</span>
         </button>
       `).join("");
       resultsEl.querySelectorAll("button").forEach(button => {
         button.addEventListener("click", () => loadProfile(button.dataset.id));
       });
       renderPager(data.pagination);
-      await loadProfile(data.results[0].fragrance_edition_id);
+      resultsMetaEl.textContent = `${data.pagination.total_results.toLocaleString()} found for "${query || "all"}"`;
     }
 
     function renderPager(pagination) {
@@ -2580,60 +2996,90 @@ APP_HTML = """<!doctype html>
       pagerEl.hidden = false;
       const start = pagination.total_results ? ((pagination.page - 1) * pagination.per_page) + 1 : 0;
       const end = Math.min(pagination.page * pagination.per_page, pagination.total_results);
-      pagerStatusEl.textContent = `${start}-${end} of ${pagination.total_results}`;
+      pagerStatusEl.textContent = `${start}-${end} of ${pagination.total_results.toLocaleString()}`;
       previousPageButton.disabled = !pagination.has_previous;
       nextPageButton.disabled = !pagination.has_next;
     }
 
     async function loadProfile(id) {
-      profileEl.innerHTML = `<div class="empty">Loading Scent Profile...</div>`;
+      const requestId = ++profileRequestId;
+      ++matchesRequestId;
+      profileEl.innerHTML = `<div class="empty loading">Loading Scent Profile...</div>`;
+      showScreen("profile");
       const profileResponse = await fetch(`/api/profile?id=${encodeURIComponent(id)}`);
       const profile = await profileResponse.json();
+      if (requestId !== profileRequestId) return;
       if (profile.status !== "ok") {
         profileEl.innerHTML = `<div class="empty warning">Fragrance Edition not found.</div>`;
         return;
       }
+      selectedProfile = profile;
       const scent = profile.scent_profile;
       profileEl.innerHTML = `
-        <div class="detail-grid">
-          <div class="facts">
-            <div>
-              <strong>${escapeHtml(profile.edition)}</strong>
-              <div class="meta">${escapeHtml(profile.fragrance)}${profile.concentration ? " &middot; " + escapeHtml(profile.concentration) : ""}</div>
-            </div>
-            <div class="fact"><span>Main accords</span>${chips(scent.main_accords)}</div>
-            <div class="fact"><span>Top notes</span>${chips(scent.note_pyramid.top)}</div>
-            <div class="fact"><span>Middle notes</span>${chips(scent.note_pyramid.middle)}</div>
-            <div class="fact"><span>Base notes</span>${chips(scent.note_pyramid.base)}</div>
-            <div class="fact"><span>Scent family</span><div class="chip">${escapeHtml(text(scent.scent_family))}</div></div>
+        <div class="profile-shell">
+          <div class="profile-head">
+            <div class="eyebrow">Scent Profile</div>
+            <h2 class="compact-title" id="profile-title">${escapeHtml(profile.edition)}</h2>
+            <p class="subtle">${escapeHtml(selectedEditionMeta(profile))}</p>
+            <div class="family-medallion">${escapeHtml(titleCase(displayText(scent.scent_family)))}</div>
           </div>
           <div>
-            <h2>Scent Matches</h2>
-            <div class="matches" id="matches"><div class="empty">Loading matches...</div></div>
+            <div class="section-title">Main accords</div>
+            <div class="accords">${normalizeList(scent.main_accords).map(item => `<span class="chip${item === "unknown" ? " unknown" : ""}">${escapeHtml(item)}</span>`).join("")}</div>
           </div>
+          <div>
+            <div class="section-title">Notes</div>
+            <div class="pyramid" aria-label="Note pyramid">
+              <div class="note-column"><h3>Top</h3>${chips(scent.note_pyramid.top)}</div>
+              <div class="note-column"><h3>Middle</h3>${chips(scent.note_pyramid.middle)}</div>
+              <div class="note-column"><h3>Base</h3>${chips(scent.note_pyramid.base)}</div>
+            </div>
+          </div>
+          <button class="primary" id="find-matches" type="button">Find matches</button>
+          <button class="text-button" id="back-to-results" type="button">Back to results</button>
         </div>
       `;
-      await loadMatches(id);
+      document.querySelector("#find-matches").addEventListener("click", () => loadMatches(profile.fragrance_edition_id));
+      document.querySelector("#back-to-results").addEventListener("click", () => showScreen("results"));
+    }
+
+    function scoreWidth(score) {
+      const numeric = Number(score);
+      if (!Number.isFinite(numeric)) return 0;
+      return Math.max(4, Math.min(100, Math.round(numeric * 100)));
     }
 
     async function loadMatches(id) {
-      const matchesEl = document.querySelector("#matches");
-      if (!matchesEl) return;
+      const requestId = ++matchesRequestId;
+      const title = selectedProfile ? selectedProfile.edition : "Nearby choices";
+      document.querySelector("#matches-title").textContent = title;
+      matchesEl.innerHTML = `<div class="empty loading">Finding matches...</div>`;
+      showScreen("matches");
       try {
         const matchesResponse = await fetch(`/api/matches?id=${encodeURIComponent(id)}&limit=5`);
         const matches = await matchesResponse.json();
+        if (requestId !== matchesRequestId) return;
         if (matches.status === "error") {
           matchesEl.innerHTML = `<div class="empty warning">Scent Matches are unavailable right now.</div>`;
           return;
         }
-        matchesEl.innerHTML = (matches.results || []).map(match => `
-          <div class="match">
-            <strong>${escapeHtml(match.edition)}</strong>
-            <div class="meta">${escapeHtml(match.fragrance)}${match.concentration ? " &middot; " + escapeHtml(match.concentration) : ""}</div>
-            <div class="score">${escapeHtml(match.scent_match.strength_label)} &middot; ${escapeHtml(match.scent_match.model_specific_score)}</div>
-          </div>
-        `).join("") || `<div class="empty">No matches yet.</div>`;
+        matchesEl.innerHTML = (matches.results || []).map(match => {
+          const score = match.scent_match.model_specific_score;
+          return `
+            <div class="match">
+              <div>
+                <strong class="match-title">${escapeHtml(match.edition)}</strong>
+                <div class="meta">${escapeHtml(match.fragrance)}${match.concentration ? " / " + escapeHtml(match.concentration) : ""}</div>
+              </div>
+              <div class="score-row">
+                <div class="score-track" aria-label="Model score ${escapeHtml(score)}" role="img"><div class="score-fill" style="--score-width: ${scoreWidth(score)}%"></div></div>
+                <div class="score">${escapeHtml(match.scent_match.strength_label)}</div>
+              </div>
+            </div>
+          `;
+        }).join("") || `<div class="empty">No Scent Matches yet.</div>`;
       } catch (error) {
+        if (requestId !== matchesRequestId) return;
         matchesEl.innerHTML = `<div class="empty warning">Scent Matches are unavailable right now.</div>`;
       }
     }
@@ -2642,15 +3088,19 @@ APP_HTML = """<!doctype html>
       event.preventDefault();
       search(queryInput.value.trim(), 1);
     });
-
     previousPageButton.addEventListener("click", () => {
       if (currentPage > 1) search(queryInput.value.trim(), currentPage - 1);
     });
     nextPageButton.addEventListener("click", () => {
       search(queryInput.value.trim(), currentPage + 1);
     });
+    changeSearchButton.addEventListener("click", () => {
+      showScreen("search");
+      queryInput.focus();
+    });
+    backToProfileButton.addEventListener("click", () => showScreen("profile"));
 
-    loadStatus().then(() => search(queryInput.value, 1));
+    loadStatus();
   </script>
 </body>
 </html>
@@ -2689,6 +3139,8 @@ def _make_app_handler(database: Path, index: Path) -> type[BaseHTTPRequestHandle
             try:
                 if parsed.path == "/":
                     self._send_html(APP_HTML)
+                elif parsed.path == "/assets/noseprint-logo.png":
+                    self._send_png(Path(__file__).resolve().parent.parent / "assets" / "noseprint-logo.png")
                 elif parsed.path == "/api/status":
                     self._send_json(_app_status(database))
                 elif parsed.path == "/api/search":
@@ -2740,6 +3192,17 @@ def _make_app_handler(database: Path, index: Path) -> type[BaseHTTPRequestHandle
             encoded = body.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def _send_png(self, path: Path) -> None:
+            if not path.exists():
+                self.send_error(404)
+                return
+            encoded = path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
             self.wfile.write(encoded)
